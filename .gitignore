@@ -1,0 +1,14 @@
+**/.DS_Store
+node_modules
+lib
+coverage
+test-results
+playwright-report
+.vscode
+.idea
+
+# Android driver build output
+agent/.gradle
+agent/build
+agent/*/build
+agent/local.properties

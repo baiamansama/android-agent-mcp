@@ -1,0 +1,33 @@
+# Changelog
+
+## Unreleased
+
+First public release, forked from [mobile-mcp](https://github.com/mobile-next/mobile-mcp) 0.0.62.
+See [NOTICE](NOTICE) for the full list of modifications.
+
+### The on-device agent
+
+- **Standalone driver** (`agent/`): the agent now ships in its own app whose instrumentation
+  targets an empty stub, so starting it never restarts the app under test. It drives any app on the
+  device via `UiAutomation`, including apps you did not write.
+- Wire protocol **6**: newline-delimited JSON over a loopback socket, versioned against the host and
+  refused on mismatch. See [docs/AGENT_PROTOCOL.md](docs/AGENT_PROTOCOL.md).
+- `capabilities` op reports measured device facts — notably whether this device permits a clipboard
+  write from an unfocused process, which decides whether the text-entry fallback is available.
+- Text entry tries `ACTION_SET_TEXT` first and escalates to clipboard-paste only when the tree shows
+  the write was reverted.
+- One-command install: `npm run agent:install`.
+
+### Host
+
+- Agent identity is configuration, not a constant (`src/config.ts`): `ANDROID_AGENT_TEST_PACKAGE`,
+  `ANDROID_AGENT_TARGET_PACKAGE`, `ANDROID_AGENT_CLASS`, `ANDROID_AGENT_MODE`.
+- The `am instrument` restart guard now applies only in embedded mode, where it is real.
+- `mobile_agent_status` reports the configured identity, the mode, and — when the agent is absent —
+  the instrumentations actually installed, so a mismatch explains itself.
+- 37 tools, stdio only. Upstream's Express/SSE listener and its dependency tree were removed.
+- No telemetry.
+
+### Removed from upstream
+
+- The iOS surface, the `mobilecli` backend (FSL-licensed), and default-on PostHog analytics.

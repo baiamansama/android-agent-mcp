@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: Host (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+
+      # --ignore-scripts because nothing in the dependency tree needs a postinstall, and a
+      # lockfile-driven CI should not run arbitrary install hooks.
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Audit (production dependencies)
+        run: npm audit --audit-level high --omit dev
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      # Device-backed suites are opt-in and stay off here; these are the unit tests, which need
+      # no emulator and so cannot be flaky for device reasons.
+      - name: Test
+        run: npm test
+
+  agent:
+    name: Agent (Android driver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Compiling both APKs is the check that matters: it proves the agent still builds against
+      # the pinned AGP/SDK, and that the instrumentation APK is produced at all. Running it needs
+      # an emulator, which is verified by hand — see CONTRIBUTING.md.
+      - name: Build the driver
+        working-directory: agent
+        run: ./gradlew :driver:assembleDebug :driver:assembleDebugAndroidTest --no-daemon

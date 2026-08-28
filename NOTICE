@@ -1,0 +1,28 @@
+android-agent-mcp
+Copyright 2026 the android-agent-mcp authors
+
+This product includes software developed by Mobile Next HQ, Inc.
+(https://github.com/mobile-next/mobile-mcp), licensed under the
+Apache License, Version 2.0. A copy of that license is in LICENSE.
+
+Forked from @mobilenext/mobile-mcp at tag 0.0.62 (commit 6c4504a, 2026-07-11),
+the last release before upstream moved its device backend to `mobilecli`, which
+is distributed under the Functional Source License 1.1 rather than an
+open-source license. This project deliberately does not use or link that
+backend.
+
+Modifications:
+  - Removed the iOS surface (ios.ts, iphone-simulator.ts, webdriver-agent.ts).
+  - Removed the mobilecli client and the mobilecli-backed device implementation
+    (mobilecli.ts, mobile-device.ts); this project drives adb directly.
+  - Removed on-by-default telemetry to a third-party analytics endpoint.
+  - Removed the Express/SSE network listener and its dependency tree
+    (express, qs, commander, ajv, zod-to-json-schema); the server is stdio-only.
+  - Reduced device discovery and robot resolution to Android only.
+  - Added the on-device instrumentation agent and its wire protocol, the
+    identity-based tool surface, action verification, polling assertions,
+    composite journeys, and the environment/diagnostic tools. See
+    docs/ARCHITECTURE.md.
+
+CODE_OF_CONDUCT.md is adapted from the Contributor Covenant, version 2.0,
+https://www.contributor-covenant.org/version/2/0/code_of_conduct.html

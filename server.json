@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.baiamansama/android-agent-mcp",
+  "description": "Android device automation over adb, with an optional on-device agent for a live accessibility tree, per-node visibility, verified actions and Unicode text entry.",
+  "repository": {
+    "url": "https://github.com/baiamansama/android-agent-mcp",
+    "source": "github"
+  },
+  "version": "{{VERSION}}",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "android-agent-mcp",
+      "version": "{{VERSION}}",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "name": "android-agent-mcp",
+  "version": "0.1.0",
+  "description": "Android device automation MCP server. Reads the live accessibility tree in-process, acts on nodes instead of coordinates, verifies every action, and enters Unicode text \u2014 over adb, or ~10x faster through an on-device agent.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "android",
+    "adb",
+    "automation",
+    "ui-testing",
+    "uiautomator",
+    "accessibility",
+    "emulator",
+    "llm-agent"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "commonjs",
+  "main": "lib/index.js",
+  "bin": {
+    "android-agent-mcp": "lib/index.js"
+  },
+  "files": [
+    "lib",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x lib/index.js",
+    "watch": "tsc --watch",
+    "clean": "rm -rf lib",
+    "lint": "eslint .",
+    "fixlint": "eslint . --fix",
+    "test": "c8 playwright test",
+    "agent:build": "cd agent && ./gradlew :driver:assembleDebug :driver:assembleDebugAndroidTest",
+    "agent:install": "node scripts/install-agent.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "fast-xml-parser": "5.10.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.2.0",
+    "@eslint/js": "^9.19.0",
+    "@playwright/test": "1.62.1",
+    "@stylistic/eslint-plugin": "^3.0.1",
+    "@types/node": "26.1.2",
+    "@typescript-eslint/eslint-plugin": "8.66.0",
+    "@typescript-eslint/parser": "8.66.0",
+    "@typescript-eslint/utils": "8.66.0",
+    "c8": "12.0.0",
+    "eslint": "^9.19.0",
+    "eslint-plugin-import": "^2.31.0",
+    "typescript": "5.8.2"
+  }
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The driver app is deliberately inert: no activity, no service, no receiver, nothing exported and
+  nothing launchable. Its only job is to exist so that `am instrument` has a target package whose
+  process it may restart harmlessly — which is what frees the agent from having to live inside the
+  app under test.
+
+  It does need real code, though: `am instrument` refuses a target with `hasCode="false"`
+  ("Instrumentation target has no code"), so the module ships one placeholder class.
+
+  INTERNET is required because Android gates *all* socket creation on it, including the loopback
+  ServerSocket the agent binds. The agent binds 127.0.0.1 only and is reachable solely through an
+  `adb forward`; nothing here listens on an external interface.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Android Agent Driver" />
+
+</manifest>
