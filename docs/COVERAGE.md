@@ -63,7 +63,7 @@ Legend: ✅ have · ⬆ have, structurally stronger · ❌ gap · — not applic
 |---|---|---|---|
 | Dark mode | ❌ | ✅ `set_sim_appearance` | ✅ `mobile_device_state` nightMode |
 | Font scale | ❌ | ❌ | ⬆ `mobile_device_state` fontScale (Dynamic-Type gate) |
-| Density / window size | ❌ | ❌ | ⬆ `mobile_device_state` density |
+| Density / window size | ❌ | ❌ | ⬆ `mobile_device_state` density, and `size` to resize into an androidx window size class (`compact`/`medium`/`expanded`/`large`/`extraLarge`) so one device covers every adaptive band |
 | Animations off (deterministic screenshots) | ❌ | ❌ | ⬆ `mobile_device_state` animations |
 | Locale | ❌ | ❌ (sim boot arg only) | ⬆ per-app locale at launch and `mobile_app_state` locale without reinstall (API 33+) |
 | Permission grants | ❌ | ❌ (simctl privacy exists, unexposed) | ✅ `mobile_app_state` permissions grant/revoke/list |

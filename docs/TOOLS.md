@@ -52,7 +52,9 @@ Save a full-resolution screenshot of the mobile device to a file
 | `saveTo` *(required)* | `string` | The path to save the screenshot to. Filename must end with .png, .jpg, or .jpeg |
 
 ### `mobile_get_screen_size`
-Get the screen size of the mobile device in pixels
+Screen geometry in pixels and in dp, with the androidx window size class the window falls in. The dp width is what adaptive layouts branch on — pixels alone cannot tell a 1280dp tablet from a 900dp one, and both report as "a tablet". Coordinates for every other tool in this server are in pixels.
+
+Width classes are `compact` (<600dp), `medium` (600–839), `expanded` (840–1199), `large` (1200–1599) and `extraLarge` (≥1600); height classes are `compact` (<480dp), `medium` (480–899) and `expanded` (≥900). The breakpoints are `androidx.window.core.layout.WindowSizeClass`'s, so the class reported here is the class the app under test branched on.
 
 ---
 
@@ -264,7 +266,7 @@ Inspect or reset one app's environment. action info: version, running state and 
 The matrix a visible change has to survive, settable in one call each.
 
 ### `mobile_device_state`
-Read or change the device-state matrix in one call: display (font scale, dark mode, animations, density), connectivity (airplane mode, wifi, mobile data) and orientation. Call with no arguments to read everything. Name any subset to change it; the full post-change snapshot is returned. This is the matrix a visible change must survive — font scale for Dynamic Type, night mode for dark theme, animations off for deterministic screenshots, airplane mode for the offline release gates. Values persist on the device, so reset what you change, and always restore connectivity when an offline check is done.
+Read or change the device-state matrix in one call: display (font scale, dark mode, animations, density), window size class, connectivity (airplane mode, wifi, mobile data) and orientation. Call with no arguments to read everything, including the window's dp geometry and its androidx size class. Name any subset to change it; the full post-change snapshot is returned. This is the matrix a visible change must survive — font scale for Dynamic Type, night mode for dark theme, animations off for deterministic screenshots, `size` for the adaptive width bands, airplane mode for the offline release gates. Values persist on the device, so reset what you change, and always restore connectivity when an offline check is done.
 
 | Parameter | Type | |
 |---|---|---|
@@ -276,6 +278,20 @@ Read or change the device-state matrix in one call: display (font scale, dark mo
 | `wifi` | `boolean` | Turn wifi on/off. |
 | `mobileData` | `boolean` | Turn mobile data on/off. |
 | `orientation` | `portrait` \| `landscape` | Rotate the display (verified: the call blocks until the display actually turns). |
+| `size` | `string` | Resize the window to a size class, so one device can be driven through every adaptive band: "compact", "medium", "expanded", "large", "extraLarge", an explicit "<width>x<height>" in dp, or "reset" to restore the physical size. A named band changes width only and holds height, so the width class is the single variable that moved. Verified: the display is re-read afterwards and the call fails rather than reporting a band it did not reach. |
+
+`size` exists because one tablet can stand in for the whole range. A named band holds height
+deliberately: the Material reflow bugs this is for live at a width band crossed *at a given height*
+(`SupportingPaneScaffold` reflows its supporting pane under the main one at width 600–840dp and
+height ≥900dp), and a resize that moved both would step straight over them.
+
+Two measured details it handles for you. `wm size` does not resize the current window — it redefines
+the display's **natural** frame, and the live window is that frame turned by `user_rotation`; writing
+a size therefore silently changes what an already-written rotation means. On the Pixel Tablet AVD
+(2026-09-03), a 1400×1600 override with `user_rotation 1` gave landscape, and after `wm size reset`
+the same unchanged `1` gave portrait. So the rotation is pinned while the size is written and the
+result is read back from the window manager rather than assumed; `reset` then restores the
+orientation it found, because a reset should undo the size and nothing else.
 
 ### `mobile_emulator`
 Emulator-only controls a stock physical device cannot offer, via the emulator console: network shaping (bandwidth profile and latency — the slow-network half of the offline release gates), battery level and AC simulation, and fold/unfold or posture for foldable AVDs. Name any subset; each command's console reply is reported. Restore shaping to full/none when the check is done. Fails on a physical device.

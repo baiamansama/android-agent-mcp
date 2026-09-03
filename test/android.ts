@@ -1,7 +1,8 @@
 import { test, expect } from "@playwright/test";
 
 import { PNG } from "../src/png";
-import { AndroidRobot, AndroidDeviceManager } from "../src/android";
+import { AndroidRobot, AndroidDeviceManager, WIDTH_CLASS_TARGET_DP, heightClassFor, widthClassFor } from "../src/android";
+import { parseWindowSize } from "../src/server";
 
 const manager = new AndroidDeviceManager();
 const devices = manager.getConnectedDevices();
@@ -172,5 +173,91 @@ test.describe("android", () => {
 		expect(screenSize2.width).toBe(screenSize1.height);
 		expect(screenSize2.height).toBe(screenSize1.width);
 		expect(screenSize2.scale).toBe(screenSize1.scale);
+	});
+
+	test("should report window metrics in dp with a size class", async () => {
+		test.skip(!hasOneAndroidDevice, "requires exactly one android device");
+		const metrics = await android.getWindowMetrics();
+
+		// dp is pixels over the density scale, and the two are read separately — a mismatch here
+		// means the geometry cache served a pre-resize pixel size next to a fresh configuration.
+		expect(metrics.widthDp).toBeCloseTo(metrics.widthPx / (metrics.density / 160), -1);
+		expect(metrics.heightDp).toBeCloseTo(metrics.heightPx / (metrics.density / 160), -1);
+		expect(metrics.smallestWidthDp).toBeLessThanOrEqual(Math.max(metrics.widthDp, metrics.heightDp));
+		expect(metrics.widthClass).toBe(widthClassFor(metrics.widthDp));
+		expect(metrics.heightClass).toBe(heightClassFor(metrics.heightDp));
+	});
+
+	test("should resize into a width class and back", async () => {
+		test.skip(!hasOneAndroidDevice, "requires exactly one android device");
+		const before = await android.getWindowMetrics();
+		const beforeOrientation = await android.getOrientation();
+
+		try {
+			const medium = await android.setWindowSize(parseWindowSize("medium", before));
+			expect(medium.widthClass).toBe("medium");
+			// A named band moves width only: the Material reflow this exists to catch is a width
+			// band crossed at a fixed height, and a resize that changed both would step over it.
+			expect(medium.heightDp).toBe(before.heightDp);
+
+			const compact = await android.setWindowSize(parseWindowSize("compact", medium));
+			expect(compact.widthClass).toBe("compact");
+			expect(compact.heightDp).toBe(before.heightDp);
+		} finally {
+			// `wm size` re-bases the natural frame, so a device left overridden reports rotations
+			// that mean the opposite of what the next test expects.
+			await android.setWindowSize("reset");
+		}
+
+		// Reset is an undo, orientation included: a named band can turn the device (700x800dp is
+		// portrait however the tablet started), and restoring the orientation found at reset time
+		// would restore the one the resize caused rather than the one the caller had.
+		const after = await android.getWindowMetrics();
+		expect(after.widthPx).toBe(before.widthPx);
+		expect(after.heightPx).toBe(before.heightPx);
+		expect(after.widthClass).toBe(before.widthClass);
+		expect(await android.getOrientation()).toBe(beforeOrientation);
+	});
+});
+
+test.describe("window size classes", () => {
+
+	/**
+	 * The breakpoints are `androidx.window.core.layout.WindowSizeClass`'s, read out of
+	 * window-core-android 1.5.1. They are pinned here because the whole value of reporting a class
+	 * is that it is the same class the app under test branched on: a table that quietly drifts from
+	 * androidx would report a band no code anywhere agrees with.
+	 */
+	test("should match the androidx breakpoints exactly", () => {
+		expect(widthClassFor(0)).toBe("compact");
+		expect(widthClassFor(599)).toBe("compact");
+		expect(widthClassFor(600)).toBe("medium");
+		expect(widthClassFor(839)).toBe("medium");
+		expect(widthClassFor(840)).toBe("expanded");
+		expect(widthClassFor(1199)).toBe("expanded");
+		expect(widthClassFor(1200)).toBe("large");
+		expect(widthClassFor(1599)).toBe("large");
+		expect(widthClassFor(1600)).toBe("extraLarge");
+
+		expect(heightClassFor(479)).toBe("compact");
+		expect(heightClassFor(480)).toBe("medium");
+		expect(heightClassFor(899)).toBe("medium");
+		expect(heightClassFor(900)).toBe("expanded");
+	});
+
+	test("should place every named band inside its own class", () => {
+		for (const [name, widthDp] of Object.entries(WIDTH_CLASS_TARGET_DP)) {
+			expect(widthClassFor(widthDp)).toBe(name);
+		}
+	});
+
+	test("should parse size requests", () => {
+		const current = { widthDp: 1280, heightDp: 800 } as never;
+		expect(parseWindowSize("reset", current)).toBe("reset");
+		expect(parseWindowSize("RESET", current)).toBe("reset");
+		expect(parseWindowSize("medium", current)).toEqual({ widthDp: 700, heightDp: 800 });
+		expect(parseWindowSize("600x900", current)).toEqual({ widthDp: 600, heightDp: 900 });
+		expect(parseWindowSize(" 600 x 900 ", current)).toEqual({ widthDp: 600, heightDp: 900 });
+		expect(() => parseWindowSize("tablet", current)).toThrow(/Unrecognised size/);
 	});
 });

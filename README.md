@@ -107,8 +107,9 @@ Full reference with every parameter: **[docs/TOOLS.md](docs/TOOLS.md)**.
 `mobile_terminate_app` · `mobile_install_app` · `mobile_uninstall_app` · `mobile_app_state`
 
 **Environment**
-`mobile_device_state` (font scale, dark mode, animations, density, airplane mode, wifi, data,
-orientation) · `mobile_emulator` (bandwidth/latency shaping, battery, fold/posture)
+`mobile_device_state` (font scale, dark mode, animations, density, window size class, airplane
+mode, wifi, data, orientation) · `mobile_emulator` (bandwidth/latency shaping, battery,
+fold/posture)
 
 **Diagnostics**
 `mobile_logcat` · `mobile_list_crashes` · `mobile_get_crash` · `mobile_start_screen_recording` ·

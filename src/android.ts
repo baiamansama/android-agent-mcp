@@ -13,6 +13,67 @@ export interface AndroidDevice {
 	deviceType: "tv" | "mobile";
 }
 
+/**
+ * Window size classes, named as `androidx.window.core.layout.WindowSizeClass` names them.
+ *
+ * Adaptive Android UI branches on the window's width and height in dp, never on a device label,
+ * so "verified on a tablet" is not a claim until the band the window was actually in can be
+ * named. `large` and `extraLarge` are not decoration: a 1280dp tablet is `large`, and code that
+ * only knows about `expanded` cannot tell it apart from a 900dp one.
+ */
+export type WidthClass = "compact" | "medium" | "expanded" | "large" | "extraLarge";
+export type HeightClass = "compact" | "medium" | "expanded";
+
+export interface WindowMetrics {
+	widthPx: number;
+	heightPx: number;
+	density: number;
+	widthDp: number;
+	heightDp: number;
+	smallestWidthDp: number;
+	widthClass: WidthClass;
+	heightClass: HeightClass;
+}
+
+export type WindowSizeRequest = "reset" | { widthDp: number; heightDp: number };
+
+/**
+ * Breakpoints from `androidx.window.core.layout.WindowSizeClass`, read out of
+ * window-core-android 1.5.1 sources (`BREAKPOINTS_V2`). Ordered high to low: first hit wins.
+ */
+const WIDTH_DP_BANDS: ReadonlyArray<readonly [WidthClass, number]> = [
+	["extraLarge", 1600],
+	["large", 1200],
+	["expanded", 840],
+	["medium", 600],
+	["compact", 0],
+];
+
+const HEIGHT_DP_BANDS: ReadonlyArray<readonly [HeightClass, number]> = [
+	["expanded", 900],
+	["medium", 480],
+	["compact", 0],
+];
+
+export const widthClassFor = (widthDp: number): WidthClass =>
+	WIDTH_DP_BANDS.find(([, lowerBound]) => widthDp >= lowerBound)?.[0] ?? "compact";
+
+export const heightClassFor = (heightDp: number): HeightClass =>
+	HEIGHT_DP_BANDS.find(([, lowerBound]) => heightDp >= lowerBound)?.[0] ?? "compact";
+
+/**
+ * The width to use when a caller names a band instead of a number. Each sits clear of its own
+ * boundaries so rounding cannot spill into the neighbouring band; `compact` is 412dp because
+ * that is the width of the phones a compact layout is drawn for.
+ */
+export const WIDTH_CLASS_TARGET_DP: Readonly<Record<WidthClass, number>> = {
+	compact: 412,
+	medium: 700,
+	expanded: 1000,
+	large: 1400,
+	extraLarge: 1700,
+};
+
 interface UiAutomatorXmlNode {
 	node: UiAutomatorXmlNode[];
 	class?: string;
@@ -119,6 +180,16 @@ export class AndroidRobot implements Robot {
 
 	/** Short-lived geometry cache: three adb round trips per read, consulted by every swipe/pinch. */
 	private screenSizeCache: { value: ScreenSize; at: number } | null = null;
+
+	/**
+	 * The orientation in force when this robot first overrode the display size.
+	 *
+	 * Restoring "the orientation found at reset time" is not an undo: by then the orientation is
+	 * itself a product of the override — a 700x800dp window is portrait whatever the device was —
+	 * so a landscape tablet resized to medium and reset came back portrait. Only the orientation
+	 * from before the first override is the one the caller had.
+	 */
+	private orientationBeforeOverride: Orientation | null = null;
 
 	/** Rotation and density changes make cached geometry wrong; those paths call this. */
 	protected invalidateScreenSize(): void {
@@ -597,6 +668,148 @@ export class AndroidRobot implements Robot {
 		const size = this.adb("shell", "wm", "size").toString().match(/Override size:\s*(\d+)x(\d+)/)
 			?? this.adb("shell", "wm", "size").toString().match(/Physical size:\s*(\d+)x(\d+)/);
 		return size && Number(size[1]) > Number(size[2]) ? "landscape" : "portrait";
+	}
+
+	// -------------------------------------------------------------------------
+	// Window size class
+	//
+	// The server reported pixels and density and left the arithmetic — and the breakpoint table —
+	// to the caller, which is the step that gets skipped. A caller who cannot name the band cannot
+	// tell a passing screenshot from one taken in the wrong window.
+	// -------------------------------------------------------------------------
+
+	/**
+	 * The window's geometry in the units adaptive code reasons in.
+	 *
+	 * dp comes from `am get-config`, which is the configuration Android itself resolves resource
+	 * qualifiers and `LocalConfiguration` against — the same numbers the app under test branches
+	 * on. Dividing display pixels by density can disagree with it, because the configuration
+	 * accounts for insets the raw display size does not; that derivation is the fallback for a
+	 * configuration that cannot be parsed, never for one that could not be read.
+	 *
+	 * This describes the default display. An app in split-screen or freeform occupies less than
+	 * this, and no adb surface reports that window's dp without the in-process agent.
+	 */
+	public async getWindowMetrics(): Promise<WindowMetrics> {
+		// Deliberately past the geometry cache. Pixels and dp come from two different adb reads,
+		// and pairing a cached pixel size with a fresh configuration reports a window that does not
+		// exist: measured mid-resize as 2560x824px alongside 412x1280dp, one landscape and one
+		// portrait. This is a diagnostic call, not the swipe hot path, so it pays for the round trip.
+		this.invalidateScreenSize();
+		const screen = await this.getScreenSize();
+
+		// `am get-config` is polled hardest immediately after a resize, which is exactly when the
+		// activity manager is rebuilding every activity — measured failing there on the
+		// software-rendered tablet AVD. One retry absorbs that; a second failure is rethrown rather
+		// than swallowed, because the other reason this call fails is that the device has gone, and
+		// quietly substituting a derived number would report a window that no longer exists.
+		let config: string;
+		try {
+			config = this.adb("shell", "am", "get-config").toString();
+		} catch {
+			await new Promise(resolve => setTimeout(resolve, 500));
+			config = this.adb("shell", "am", "get-config").toString();
+		}
+
+		const parse = (pattern: RegExp): number | null => {
+			const value = Number(config.match(pattern)?.[1]);
+			return Number.isFinite(value) && value > 0 ? value : null;
+		};
+
+		const widthDp = parse(/-w(\d+)dp\b/) ?? Math.round(screen.width / screen.scale);
+		const heightDp = parse(/-h(\d+)dp\b/) ?? Math.round(screen.height / screen.scale);
+
+		return {
+			widthPx: screen.width,
+			heightPx: screen.height,
+			density: Math.round(screen.scale * 160),
+			widthDp,
+			heightDp,
+			smallestWidthDp: parse(/-sw(\d+)dp\b/) ?? Math.min(widthDp, heightDp),
+			widthClass: widthClassFor(widthDp),
+			heightClass: heightClassFor(heightDp),
+		};
+	}
+
+	/**
+	 * Override the display size so the window lands in a chosen size class, then prove it did.
+	 *
+	 * `wm size` does not resize the current window — it redefines the display's NATURAL frame, and
+	 * the live window is that frame turned by whatever `user_rotation` holds. Writing a size
+	 * therefore silently changes what an already-written rotation means. Measured on the Pixel
+	 * Tablet AVD, 2026-09-03: with a 1400x1600 override, `user_rotation 1` gave landscape
+	 * (cur=1600x1400); after `wm size reset` the same unchanged `1` gave portrait (cur=1600x2560).
+	 * Screenshots keep working across that flip, so a caller who resizes and then captures gets a
+	 * window in the band it asked for only by luck.
+	 *
+	 * So the rotation is pinned to 0 rather than preserved: with the frame and the window aligned,
+	 * the pair written is the pair that appears. Orientation becomes a consequence of the requested
+	 * dp — a window taller than it is wide is portrait — and the caller changes it afterwards if it
+	 * wants the other one. The result is read back from the window manager, never assumed.
+	 */
+	public async setWindowSize(request: WindowSizeRequest): Promise<WindowMetrics> {
+		if (request !== "reset" && this.orientationBeforeOverride === null) {
+			this.orientationBeforeOverride = await this.getOrientation();
+		}
+
+		if (request === "reset") {
+			this.adb("shell", "wm", "size", "reset");
+		} else {
+			const { scale } = await this.getScreenSize();
+			const px = (dp: number): number => Math.round(dp * scale);
+			this.adb("shell", "wm", "size", `${px(request.widthDp)}x${px(request.heightDp)}`);
+		}
+
+		this.adb("shell", "settings", "put", "system", "accelerometer_rotation", "0");
+		this.adb("shell", "settings", "put", "system", "user_rotation", "0");
+		this.invalidateScreenSize();
+
+		const target = request === "reset" ? null : widthClassFor(request.widthDp);
+		const settled = (metrics: WindowMetrics): boolean => target === null
+			// A reset is done when the override is gone, which the window manager reports by
+			// dropping the `base=` frame it was holding — not by any value the metrics can show.
+			? !this.adb("shell", "dumpsys", "window", "displays").toString().includes("base=")
+			: metrics.widthClass === target;
+
+		// The window manager re-lays out asynchronously, and on a software-rendered emulator that
+		// takes whole seconds; reading straight back reports the pre-resize window as a success.
+		const deadline = Date.now() + 8000;
+		let metrics = await this.getWindowMetrics();
+		while (!settled(metrics) && Date.now() < deadline) {
+			await new Promise(resolve => setTimeout(resolve, 200));
+			this.invalidateScreenSize();
+			metrics = await this.getWindowMetrics();
+		}
+
+		if (!settled(metrics)) {
+			throw new ActionableError(
+				request === "reset"
+					? "The display size override was not cleared."
+					: `The display did not resize to ${request.widthDp}x${request.heightDp}dp `
+						+ `(wanted width class ${target}, got ${metrics.widthDp}dp / `
+						+ `${metrics.widthClass}). The device may refuse override sizes outside the `
+						+ "range reported as `rng=` by `adb shell dumpsys window displays`."
+			);
+		}
+
+		// A reset undoes the size and nothing else. Pinning the rotation above was the only way to
+		// read the cleared frame honestly, but leaving the device turned would make "reset" change
+		// something the caller never asked about. An explicit size gets no such restore: a pair
+		// taller than it is wide IS a request for portrait.
+		//
+		// With nothing remembered — a fresh server, or a robot evicted when the device dropped off
+		// adb — the pinned rotation 0 leaves the display in its natural orientation, which is the
+		// honest answer to "put it back" when there is no record of what "back" was.
+		if (request === "reset") {
+			const restore = this.orientationBeforeOverride;
+			this.orientationBeforeOverride = null;
+			if (restore !== null && await this.getOrientation() !== restore) {
+				await this.setOrientation(restore);
+				this.invalidateScreenSize();
+				return this.getWindowMetrics();
+			}
+		}
+		return metrics;
 	}
 
 	private async getUiAutomatorDump(): Promise<string> {

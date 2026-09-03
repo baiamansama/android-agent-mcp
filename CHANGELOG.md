@@ -18,6 +18,19 @@ See [NOTICE](NOTICE) for the full list of modifications.
   the write was reverted.
 - One-command install: `npm run agent:install`.
 
+### Window size classes
+
+- `mobile_get_screen_size` and `mobile_device_state` report the window in dp with its
+  `androidx.window.core.layout.WindowSizeClass` band — `compact` / `medium` / `expanded` / `large` /
+  `extraLarge` for width, `compact` / `medium` / `expanded` for height — alongside pixels and
+  `smallestWidthDp`. Pixels alone cannot separate a 1280dp tablet from a 900dp one, and adaptive
+  layouts branch on neither.
+- `mobile_device_state` gains `size`: resize the window into a named band, an explicit `WxH` in dp,
+  or `reset`. A named band moves width and holds height, so the width class is the only variable
+  that changed. The rotation is pinned across the write (`wm size` redefines the display's natural
+  frame, which silently reverses what an existing `user_rotation` means) and the result is read back
+  from the window manager, so the call fails rather than reporting a band it did not reach.
+
 ### Host
 
 - Agent identity is configuration, not a constant (`src/config.ts`): `ANDROID_AGENT_TEST_PACKAGE`,

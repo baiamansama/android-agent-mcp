@@ -6,7 +6,7 @@ import path from "node:path";
 import { ChildProcess, spawn, execFileSync } from "node:child_process";
 
 import { error, trace } from "./logger";
-import { AndroidDeviceManager, getAdbPath } from "./android";
+import { AndroidDeviceManager, WIDTH_CLASS_TARGET_DP, WidthClass, WindowMetrics, WindowSizeRequest, getAdbPath } from "./android";
 import { AgentAndroidRobot, ElementSelector, computeCompactDiff, describeSelector, formatCompactElementLines } from "./automation";
 import { AGENT_IDENTITY, agentStartHint } from "./agent";
 import { ActionableError } from "./robot";
@@ -36,6 +36,34 @@ interface ActiveRecording {
 	remotePath: string;
 	startedAt: number;
 }
+
+/**
+ * Turn the `size` argument into a concrete dp target.
+ *
+ * A named band changes width and keeps the current height, so the width class is the only thing
+ * that moved: the Material bug that motivated this tool lived at width 600-840dp AND height
+ * >=900dp, and a resize that quietly changed both would step straight over it.
+ */
+export const parseWindowSize = (value: string, current: WindowMetrics): WindowSizeRequest => {
+	const request = value.trim();
+	if (request.toLowerCase() === "reset") {
+		return "reset";
+	}
+
+	const explicit = request.toLowerCase().match(/^(\d+)\s*x\s*(\d+)$/);
+	if (explicit) {
+		return { widthDp: Number(explicit[1]), heightDp: Number(explicit[2]) };
+	}
+
+	const widthDp = WIDTH_CLASS_TARGET_DP[request as WidthClass];
+	if (widthDp === undefined) {
+		throw new ActionableError(
+			`Unrecognised size ${JSON.stringify(value)}. Use a size class `
+			+ `(${Object.keys(WIDTH_CLASS_TARGET_DP).join(", ")}), "<width>x<height>" in dp, or "reset".`
+		);
+	}
+	return { widthDp, heightDp: current.heightDp };
+};
 
 export const getAgentVersion = (): string => {
 	const json = require("../package.json");
@@ -337,15 +365,18 @@ export const createMcpServer = (): McpServer => {
 	tool(
 		"mobile_get_screen_size",
 		"Get Screen Size",
-		"Get the screen size of the mobile device in pixels",
+		"Screen geometry in pixels and in dp, with the androidx window size class the window falls in. The dp width is what adaptive layouts branch on \u2014 pixels alone cannot tell a 1280dp tablet from a 900dp one, and both report as \"a tablet\". Coordinates for every other tool in this server are in pixels.",
 		{
 			device: deviceParam(),
 		},
 		{ readOnlyHint: true },
 		async ({ device }) => {
 			const robot = getRobot(device);
-			const screenSize = await robot.getScreenSize();
-			return `Screen size is ${screenSize.width}x${screenSize.height} pixels`;
+			const window = await robot.getWindowMetrics();
+			return `Screen size is ${window.widthPx}x${window.heightPx} pixels `
+				+ `(${window.widthDp}x${window.heightDp} dp at ${window.density}dpi, `
+				+ `sw${window.smallestWidthDp}dp) \u2014 width class ${window.widthClass}, `
+				+ `height class ${window.heightClass}`;
 		}
 	);
 
@@ -1103,7 +1134,7 @@ export const createMcpServer = (): McpServer => {
 	tool(
 		"mobile_device_state",
 		"Get Or Set Device State",
-		"Read or change the device-state matrix in one call: display (font scale, dark mode, animations, density), connectivity (airplane mode, wifi, mobile data) and orientation. Call with no arguments to read everything. Name any subset to change it; the full post-change snapshot is returned. This is the matrix a visible change must survive — font scale for Dynamic Type, night mode for dark theme, animations off for deterministic screenshots, airplane mode for the offline release gates. Values persist on the device, so reset what you change, and always restore connectivity when an offline check is done.",
+		"Read or change the device-state matrix in one call: display (font scale, dark mode, animations, density), window size class, connectivity (airplane mode, wifi, mobile data) and orientation. Call with no arguments to read everything, including the window's dp geometry and its androidx size class. Name any subset to change it; the full post-change snapshot is returned. This is the matrix a visible change must survive — font scale for Dynamic Type, night mode for dark theme, animations off for deterministic screenshots, `size` for the adaptive width bands, airplane mode for the offline release gates. Values persist on the device, so reset what you change, and always restore connectivity when an offline check is done.",
 		{
 			device: deviceParam(),
 			fontScale: z.coerce.number().optional().describe("System font scale, e.g. 0.85, 1.0, 1.3, 2.0. A common release gate is that text stays readable at the largest scales."),
@@ -1114,14 +1145,15 @@ export const createMcpServer = (): McpServer => {
 			wifi: z.boolean().optional().describe("Turn wifi on/off."),
 			mobileData: z.boolean().optional().describe("Turn mobile data on/off."),
 			orientation: z.enum(["portrait", "landscape"]).optional().describe("Rotate the display (verified: the call blocks until the display actually turns)."),
+			size: z.string().optional().describe("Resize the window to a size class, so one device can be driven through every adaptive band: \"compact\", \"medium\", \"expanded\", \"large\", \"extraLarge\", an explicit \"<width>x<height>\" in dp, or \"reset\" to restore the physical size. A named band changes width only and holds height, so the width class is the single variable that moved. Verified: the display is re-read afterwards and the call fails rather than reporting a band it did not reach."),
 		},
 		{ destructiveHint: true },
-		async ({ device, fontScale, nightMode, animations, density, airplaneMode, wifi, mobileData, orientation }) => {
+		async ({ device, fontScale, nightMode, animations, density, airplaneMode, wifi, mobileData, orientation, size }) => {
 			const robot = getRobot(device);
 			const wantsDisplayChange = fontScale !== undefined || nightMode !== undefined
 				|| animations !== undefined || density !== undefined;
 			const wantsNetworkChange = airplaneMode !== undefined || wifi !== undefined || mobileData !== undefined;
-			const changed = wantsDisplayChange || wantsNetworkChange || orientation !== undefined;
+			const changed = wantsDisplayChange || wantsNetworkChange || orientation !== undefined || size !== undefined;
 
 			if (wantsDisplayChange) {
 				robot.setDisplayState({ fontScale, nightMode, animations, density });
@@ -1132,12 +1164,18 @@ export const createMcpServer = (): McpServer => {
 			if (wifi !== undefined || mobileData !== undefined) {
 				robot.setNetworkState({ wifi, mobileData });
 			}
+			// Size after density: dp is pixels over density, so resizing first would target the
+			// old scale. Orientation last, because resizing restores the orientation it found.
+			if (size !== undefined) {
+				await robot.setWindowSize(parseWindowSize(size, await robot.getWindowMetrics()));
+			}
 			if (orientation !== undefined) {
 				await robot.setOrientation(orientation);
 			}
 
 			const snapshot = {
 				display: robot.getDisplayState(),
+				window: await robot.getWindowMetrics(),
 				network: robot.getNetworkState(),
 				orientation: await robot.getOrientation(),
 				changed,
