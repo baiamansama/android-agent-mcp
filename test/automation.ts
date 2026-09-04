@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-import { computeCompactDiff, formatCompactElements, foldForMatch, mergeColocated, selectElements } from "../src/automation";
+import { AgentAndroidRobot, computeCompactDiff, formatCompactElements, foldForMatch, mergeColocated, selectElements } from "../src/automation";
 import { ScreenElement } from "../src/robot";
 
 const element = (partial: Partial<ScreenElement>): ScreenElement => ({
@@ -142,4 +142,59 @@ test.describe("computeCompactDiff", () => {
 		expect(diff.removed).toEqual([]);
 		expect(diff.unchanged).toBe(1);
 	});
+});
+
+test("foreground-only assertions do not require or evaluate an element selector", async () => {
+	const robot = Object.create(AgentAndroidRobot.prototype) as AgentAndroidRobot;
+	(robot as any).invalidate = () => undefined;
+	(robot as any).foregroundPackage = async () => "com.example.app";
+	(robot as any).findElements = async () => {
+		throw new Error("element lookup must not run");
+	};
+
+	const result = await robot.assertScreen(
+		undefined,
+		{ foregroundPackage: "com.example.app" },
+		0,
+	);
+
+	expect(result.passed).toBe(true);
+	expect(result.selector).toBeNull();
+	expect(result.matchCount).toBe(0);
+	expect(result.checks).toEqual([{
+		check: "foregroundPackage",
+		expected: "com.example.app",
+		actual: "com.example.app",
+		passed: true,
+	}]);
+});
+
+test("screen invalidation prevents stale foreground metadata", async () => {
+	const robot = Object.create(AgentAndroidRobot.prototype) as AgentAndroidRobot;
+	(robot as any).lastForeground = "com.android.launcher";
+	(robot as any).cachedElements = [];
+	(robot as any).agent = { protocolMismatch: null };
+	(robot as any).transport = async () => "agent";
+	(robot as any).foregroundPackage = async () => "com.example.app";
+
+	(robot as any).invalidate();
+	const result = await robot.envelope({ ok: true });
+
+	expect(result.foreground).toBe("com.example.app");
+});
+
+test("a confirmed agent foreground refreshes envelope metadata", async () => {
+	const robot = Object.create(AgentAndroidRobot.prototype) as AgentAndroidRobot;
+	(robot as any).lastForeground = "com.android.launcher";
+	(robot as any).useAgent = async () => true;
+	(robot as any).agent = {
+		waitForPackage: async () => true,
+		protocolMismatch: null,
+	};
+	(robot as any).transport = async () => "agent";
+
+	expect(await robot.waitForForeground("com.example.app", 100)).toBe(true);
+	const result = await robot.envelope({ ok: true });
+
+	expect(result.foreground).toBe("com.example.app");
 });

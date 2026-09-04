@@ -269,3 +269,7 @@ are not duplicated into both result forms.
 - **Focused traces are not benchmarks.** Perfetto and Simpleperf explain one journey. Stable
   regression claims belong in AndroidX Macrobenchmark on physical hardware and a release-like,
   profileable build.
+- **Diagnostic output is summarized by default.** `gfxinfo` raw frame timestamps are written only
+  when the caller requests an output artifact; counter reset returns an acknowledgement. Verbose
+  server traces go to `LOG_FILE`, or to stderr only with `ANDROID_AGENT_MCP_DEBUG=1`, so stdio
+  clients do not pay for a second copy of every result.

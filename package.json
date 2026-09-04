@@ -1,6 +1,6 @@
 {
   "name": "android-agent-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Android device automation MCP server. Reads the live accessibility tree in-process, acts on nodes instead of coordinates, verifies every action, and enters Unicode text — over adb, or ~10x faster through an on-device agent.",
   "keywords": [
     "mcp",

@@ -33,6 +33,14 @@ See [NOTICE](NOTICE) for the full list of modifications.
 
 ### Host
 
+- `mobile_assert` and nested run-step assertions can verify only the foreground package, without
+  inventing an element selector or paying for an unnecessary UI-tree lookup.
+- `frame_stats` omits raw profile rows from inline results and reset calls return only their
+  acknowledgement; full raw data remains available through an explicit output file.
+- Routine tool traces stay out of stderr unless `ANDROID_AGENT_MCP_DEBUG=1`, avoiding duplicate
+  model-context traffic while preserving errors and optional file logging.
+- Launch and screen-changing operations invalidate cached foreground metadata; a confirmed agent
+  launch now reports the launched package instead of a stale launcher window.
 - Agent identity is configuration, not a constant (`src/config.ts`): `ANDROID_AGENT_TEST_PACKAGE`,
   `ANDROID_AGENT_TARGET_PACKAGE`, `ANDROID_AGENT_CLASS`, `ANDROID_AGENT_MODE`.
 - The `am instrument` restart guard now applies only in embedded mode, where it is real.

@@ -25,7 +25,7 @@ case "$*" in
   *"stat -c %s"*) echo 128 ;;
   *"pull"*) printf trace > "\${@: -1}" ;;
   *"simpleperf report"*) echo "12.5% com.example.HotPath" ;;
-  *"dumpsys gfxinfo"*) echo "Janky frames: 2 (4.00%)" ;;
+  *"dumpsys gfxinfo"*) printf 'Janky frames: 2 (4.00%%)\n---PROFILEDATA---\nlarge,raw,frame,data\n' ;;
   *"dumpsys meminfo"*) echo "TOTAL PSS: 12345" ;;
   *"am dumpheap"*) exit 0 ;;
   *) exit 0 ;;
@@ -84,7 +84,15 @@ test("frame and memory snapshots return bounded evidence", () => {
 	const rig = makeAdb();
 	try {
 		const controller = new AndroidPerformanceController(rig.adb);
-		expect(controller.frameStats(DEVICE, "com.example.app").text).toContain("Janky frames");
+		const frames = controller.frameStats(DEVICE, "com.example.app");
+		expect(frames.text).toContain("Janky frames");
+		expect(frames.text).not.toContain("large,raw,frame,data");
+		expect(frames.profileDataOmitted).toBe(true);
+		expect(controller.frameStats(DEVICE, "com.example.app", true)).toEqual({
+			packageName: "com.example.app",
+			reset: true,
+			outputPath: undefined,
+		});
 		expect(controller.memorySnapshot(DEVICE, "com.example.app").text).toContain("TOTAL PSS");
 	} finally {
 		rig.cleanup();

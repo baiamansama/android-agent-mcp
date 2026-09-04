@@ -201,6 +201,9 @@ Assert something about the screen, waiting up to timeoutMs for it to come true â
 | `foregroundPackage` | `string` | Package that must own the foreground window. Guards against asserting on the wrong app. |
 | `timeoutMs` | `number` | How long to keep re-checking before declaring failure. Default 4000. 0 = single immediate check. |
 
+`foregroundPackage` may be asserted by itself. Element expectations require one of `id`,
+`idPrefix`, or `text`.
+
 ### `mobile_run_steps`
 Run a whole journey in one call, settling between steps: launch, tap, long-press, set Unicode text, scroll to an element, assert, press buttons, swipe. Stops at the first failing step with per-step timings, so one call replaces five round trips and the log says exactly where and why it stopped. Set snapshot:true to receive the final screen's compact element tree in the same result â€” saving the follow-up list call.
 

@@ -71,7 +71,7 @@ test("stdio serves the stateless 2026-07-28 protocol era", async () => {
 		send(child, { jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: meta } });
 		const discovered = await readMessage(child);
 		expect(discovered.result.supportedVersions).toContain("2026-07-28");
-		expect(discovered.result._meta["io.modelcontextprotocol/serverInfo"].version).toBe("0.2.0");
+		expect(discovered.result._meta["io.modelcontextprotocol/serverInfo"].version).toBe("0.2.1");
 
 		send(child, { jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } });
 		const listed = await readMessage(child);

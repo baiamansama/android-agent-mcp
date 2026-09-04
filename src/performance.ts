@@ -281,13 +281,29 @@ export class AndroidPerformanceController {
 		validatePackageName(packageName);
 		const args = ["shell", "dumpsys", "gfxinfo", packageName, reset ? "reset" : "framestats"];
 		const raw = this.adb(device, args);
-		const result = compactText(raw);
 		if (output) {
 			validateFileExtension(output, [".txt"], "mobile_performance frame_stats");
 			validateOutputPath(output);
 			fs.writeFileSync(output, raw);
 		}
-		return { packageName, reset, outputPath: output, truncated: result.truncated, text: result.text };
+		if (reset) {
+			// Android prints the old counters while resetting them. Do not return the
+			// discarded multi-kilobyte dump from an operation whose intent is reset.
+			return { packageName, reset: true, outputPath: output };
+		}
+		const profileMarker = "---PROFILEDATA---";
+		const markerIndex = raw.indexOf(profileMarker);
+		const summaryRaw = markerIndex >= 0 ? raw.slice(0, markerIndex).trimEnd() : raw;
+		const result = compactText(summaryRaw, 8 * 1024);
+		return {
+			packageName,
+			reset: false,
+			outputPath: output,
+			profileDataOmitted: markerIndex >= 0,
+			rawBytes: Buffer.byteLength(raw),
+			truncated: result.truncated,
+			text: result.text,
+		};
 	}
 
 	public memorySnapshot(device: string, packageName: string, output?: string): Record<string, unknown> {

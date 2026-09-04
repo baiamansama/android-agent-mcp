@@ -85,7 +85,7 @@ export interface AssertionCheck {
 
 export interface AssertionResult {
 	passed: boolean;
-	selector: string;
+	selector: string | null;
 	matchCount: number;
 	best: ScreenElement | null;
 	checks: AssertionCheck[];
@@ -530,7 +530,11 @@ export class AgentAndroidRobot extends AndroidRobot {
 	public async waitForForeground(packageName: string, timeoutMs = 10000): Promise<boolean> {
 		if (await this.useAgent()) {
 			try {
-				return await this.agent.waitForPackage(packageName, timeoutMs);
+				const visible = await this.agent.waitForPackage(packageName, timeoutMs);
+				if (visible) {
+					this.lastForeground = packageName;
+				}
+				return visible;
 			} catch (error) {
 				this.handleAgentFailure(error);
 			}
@@ -620,7 +624,7 @@ export class AgentAndroidRobot extends AndroidRobot {
 	 * carries only a message. `passed` is the verdict; `checks` says which clause decided it.
 	 */
 	public async assertScreen(
-		selector: ElementSelector,
+		selector: ElementSelector | undefined,
 		expected: {
 			exists?: boolean;
 			visible?: boolean;
@@ -647,7 +651,7 @@ export class AgentAndroidRobot extends AndroidRobot {
 	}
 
 	private async assertScreenOnce(
-		selector: ElementSelector,
+		selector: ElementSelector | undefined,
 		expected: {
 			exists?: boolean;
 			visible?: boolean;
@@ -668,16 +672,18 @@ export class AgentAndroidRobot extends AndroidRobot {
 			});
 		}
 
-		const matches = await this.findElements(selector);
+		const matches = selector ? await this.findElements(selector) : [];
 		const best = matches[0];
 
-		const shouldExist = expected.exists ?? true;
-		checks.push({
-			check: "exists",
-			expected: shouldExist,
-			actual: matches.length > 0,
-			passed: (matches.length > 0) === shouldExist,
-		});
+		if (selector) {
+			const shouldExist = expected.exists ?? true;
+			checks.push({
+				check: "exists",
+				expected: shouldExist,
+				actual: matches.length > 0,
+				passed: (matches.length > 0) === shouldExist,
+			});
+		}
 
 		if (expected.minCount !== undefined) {
 			checks.push({
@@ -714,7 +720,7 @@ export class AgentAndroidRobot extends AndroidRobot {
 
 		return {
 			passed: checks.every(check => check.passed),
-			selector: describeSelector(selector),
+			selector: selector ? describeSelector(selector) : null,
 			matchCount: matches.length,
 			best: best ?? null,
 			checks,
@@ -911,6 +917,7 @@ export class AgentAndroidRobot extends AndroidRobot {
 	/** Invalidate after anything that can move the screen. */
 	private invalidate(): void {
 		this.cachedElements = null;
+		this.lastForeground = null;
 	}
 
 	public async getElementsOnScreen(): Promise<ScreenElement[]> {

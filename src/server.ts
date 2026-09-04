@@ -139,7 +139,7 @@ export const createMcpServer = (): McpServer => {
 	const structuredObject = (value: string): Record<string, unknown> | undefined => {
 		// Avoid reflecting large diagnostics twice (text + structuredContent). Small JSON results
 		// remain machine-readable while traces, gfxinfo and meminfo stay token-bounded.
-		if (Buffer.byteLength(value) > 32 * 1024) {
+		if (Buffer.byteLength(value) > 8 * 1024) {
 			return undefined;
 		}
 		try {
@@ -1105,7 +1105,11 @@ export const createMcpServer = (): McpServer => {
 						log.push(`${i}: scrolled to ${target.identifier || target.text || target.label} ${took()}`);
 					} else if (step.assert) {
 						const { id, idPrefix, text, timeoutMs, ...expected } = step.assert;
-						const result = await robot.assertScreen(selectorFrom(id, idPrefix, text), expected, timeoutMs);
+						const selector = id || idPrefix || text ? selectorFrom(id, idPrefix, text) : undefined;
+						if (!selector && !expected.foregroundPackage) {
+							throw new ActionableError("An assert step needs a selector or foregroundPackage.");
+						}
+						const result = await robot.assertScreen(selector, expected, timeoutMs);
 						if (!result.passed) {
 							log.push(`${i}: ASSERTION FAILED ${JSON.stringify(result.checks.filter(c => !c.passed))} ${took()}`);
 							return await finish(i);
@@ -1223,8 +1227,12 @@ export const createMcpServer = (): McpServer => {
 		{ readOnlyHint: true },
 		async ({ device, id, idPrefix, text, exists, visible, textEquals, minCount, foregroundPackage, timeoutMs }) => {
 			const robot = getRobot(device);
+			const selector = id || idPrefix || text ? selectorFrom(id, idPrefix, text) : undefined;
+			if (!selector && !foregroundPackage) {
+				throw new ActionableError("Provide a selector or foregroundPackage.");
+			}
 			const result = await robot.assertScreen(
-				selectorFrom(id, idPrefix, text),
+				selector,
 				{ exists, visible, textEquals, minCount, foregroundPackage },
 				timeoutMs,
 			);
