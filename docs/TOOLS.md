@@ -1,6 +1,6 @@
 # Tool reference
 
-37 tools. Generated from the server's own schemas, so the descriptions here are the ones your MCP
+38 tools. Generated from the server's own schemas, so the descriptions here are the ones your MCP
 client actually receives.
 
 `device` is accepted by every tool except `mobile_list_available_devices` and is **optional**: when
@@ -354,6 +354,31 @@ Open or close a live mirror window of the device on this Mac via scrcpy, so a hu
 | Parameter | Type | |
 |---|---|---|
 | `action` *(required)* | `start` \| `stop` \| `status` | start opens the mirror window, stop closes it, status reports |
+
+### `mobile_performance`
+Collect focused performance evidence without assembling raw adb commands. It intentionally stays
+one tool: choose an `action`, capture exactly one user journey, and keep the tool catalog compact.
+
+| Parameter | Type | |
+|---|---|---|
+| `action` *(required)* | `capabilities` \| `start` \| `status` \| `stop` \| `frame_stats` \| `memory` \| `heap_dump` | Operation to perform |
+| `kind` | `perfetto` \| `simpleperf` | Required for `start`: system timeline or sampled CPU profile |
+| `packageName` | `string` | Target package; required for collection/snapshots and optional for capabilities |
+| `durationSeconds` | `number` | Capture ceiling, 1–300 seconds. Default 30; `stop` can finish early. |
+| `frequencyHz` | `number` | Simpleperf sampling frequency, 100–10000. Default 4000. |
+| `output` | `string` | Host path under cwd or the temp directory; extension must match the artifact. |
+| `reset` | `boolean` | With `frame_stats`, reset counters instead of reading them. |
+| `includeReport` | `boolean` | With Simpleperf `stop`, also save a text report. Default true. |
+
+Recommended focused flow: call `capabilities`; `start`; run one journey with
+`mobile_run_steps`; then `stop`. For frame evidence, reset first, run one journey, then read
+`frame_stats`. Inline diagnostic text is capped at 64 KiB; pass `output` to retain the complete
+text. Heap dumps can pause the app and contain user data, so treat the HPROF as sensitive.
+
+This is diagnostic tooling, not a replacement for repeatable release gates. Android recommends
+[Macrobenchmark](https://developer.android.com/topic/performance/benchmarking/macrobenchmark-overview)
+with a release-like, profileable app; use physical hardware for meaningful absolute performance
+numbers because [emulator measurements are affected by the host](https://developer.android.com/topic/performance/baselineprofiles/measure-baselineprofile).
 
 ### `mobile_agent_status`
 Report which transport is in use, and — when the agent is absent — exactly why and how to fix it. The on-device agent reads the live accessibility tree (~10-20x faster), acts on nodes instead of coordinates so nothing can be mis-tapped through the keyboard, reports real per-node visibility, and supports Unicode text entry. Without it everything still works over adb, minus those four things.

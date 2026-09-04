@@ -36,6 +36,9 @@ review any tool with shell access.
   settings. Both are the point of the tool and both are real changes to the device.
 - `mobile_logcat` and `mobile_get_crash` return device logs, which may contain whatever apps on
   that device chose to log.
+- `mobile_performance` can collect traces, CPU samples, memory details and heap dumps. Those
+  artifacts may contain method names, identifiers, strings or other user data; heap dumping can
+  briefly pause the target. Store and share them as sensitive developer artifacts.
 - The agent holds the device's single `UiAutomation` while running. That is a capability an
   ordinary app cannot get, which is exactly why it is instrumentation and not a library.
 

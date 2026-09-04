@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,6 +13,7 @@ import { ActionableError } from "./robot";
 import { PNG } from "./png";
 import { isScalingAvailable, Image } from "./image-utils";
 import { validateOutputPath, validateFileExtension } from "./utils";
+import { AndroidPerformanceController } from "./performance";
 
 const ALLOWED_SCREENSHOT_EXTENSIONS = [".png", ".jpg", ".jpeg"];
 const ALLOWED_RECORDING_EXTENSIONS = [".mp4"];
@@ -131,7 +132,23 @@ export const createMcpServer = (): McpServer => {
 	interface ToolAnnotations {
 		readOnlyHint?: boolean;
 		destructiveHint?: boolean;
+		idempotentHint?: boolean;
+		openWorldHint?: boolean;
 	}
+
+	const structuredObject = (value: string): Record<string, unknown> | undefined => {
+		// Avoid reflecting large diagnostics twice (text + structuredContent). Small JSON results
+		// remain machine-readable while traces, gfxinfo and meminfo stay token-bounded.
+		if (Buffer.byteLength(value) > 32 * 1024) {
+			return undefined;
+		}
+		try {
+			const parsed = JSON.parse(value);
+			return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+		} catch {
+			return undefined;
+		}
+	};
 
 	/**
 	 * One in-flight tool call per device.
@@ -155,8 +172,8 @@ export const createMcpServer = (): McpServer => {
 		server.registerTool(name, {
 			title,
 			description,
-			inputSchema: paramsSchema,
-			annotations,
+			inputSchema: z.object(paramsSchema),
+			annotations: { openWorldHint: false, ...annotations },
 		}, (async (args: any, _extra: any) => {
 			let resolvedDevice: string | undefined;
 			try {
@@ -170,8 +187,10 @@ export const createMcpServer = (): McpServer => {
 					response = await cb(args);
 				}
 				trace(`=> ${response}`);
+				const structuredContent = structuredObject(response);
 				return {
 					content: [{ type: "text", text: response }],
+					...(structuredContent ? { structuredContent } : {}),
 				};
 			} catch (error: any) {
 				evictRobotIfGone(resolvedDevice ?? args?.device, error?.message ?? "");
@@ -196,6 +215,7 @@ export const createMcpServer = (): McpServer => {
 
 	const activeRecordings = new Map<string, ActiveRecording>();
 	const watchers = new Map<string, ChildProcess>();
+	const performance = new AndroidPerformanceController();
 
 	/**
 	 * One robot per device for the life of the server.
@@ -633,11 +653,11 @@ export const createMcpServer = (): McpServer => {
 		{
 			title: "Take Screenshot",
 			description: "Screenshot, downscaled and compressed on the device for token economy. This is the fallback, not the default: mobile_list_elements_on_screen answers \"what is on screen\" faster and cheaper, and its #tags feed the element tools directly. Reach for pixels only when layout, imagery or rendering itself is the question. Do not cache this result.",
-			inputSchema: {
+			inputSchema: z.object({
 				device: deviceParam(),
 				maxWidth: z.coerce.number().min(240).max(2400).optional().describe("Longest acceptable image width in pixels. Default: device width divided by display scale, floored at 480 for legibility."),
 				quality: z.coerce.number().min(30).max(100).optional().describe("JPEG quality. Default 75."),
-			},
+			}),
 			annotations: {
 				readOnlyHint: true,
 			},
@@ -1517,6 +1537,55 @@ export const createMcpServer = (): McpServer => {
 			});
 			watchers.set(device, child);
 			return JSON.stringify({ device, watching: true, window: `android-agent-mcp — ${device}` });
+		}
+	);
+
+	tool(
+		"mobile_performance",
+		"Android Performance Evidence",
+		"Collect bounded Android performance evidence without shell choreography. capabilities checks device collectors and whether an app is debuggable/profileable; start/stop records Perfetto system traces or Simpleperf CPU samples; frame_stats reads or resets gfxinfo; memory reads meminfo; heap_dump captures an HPROF. Start a capture, drive one focused journey with mobile_run_steps, then stop it. Artifacts are saved only under the server working directory or host temp directory. For repeatable performance claims, use release-like AndroidX Macrobenchmark runs on physical hardware; this tool is for focused diagnostics and trace evidence.",
+		{
+			device: deviceParam(),
+			action: z.enum(["capabilities", "start", "status", "stop", "frame_stats", "memory", "heap_dump"]).describe("Operation to perform"),
+			kind: z.enum(["perfetto", "simpleperf"]).optional().describe("For start: trace timeline or sampled CPU profile"),
+			packageName: z.string().optional().describe("Target Android package; required except for status/stop and optional for capabilities"),
+			durationSeconds: z.coerce.number().min(1).max(300).optional().describe("For start. Default 30; the capture also can be stopped early."),
+			frequencyHz: z.coerce.number().min(100).max(10000).optional().describe("For Simpleperf start. Default 4000."),
+			output: z.string().optional().describe("Host output path. Extensions: .perfetto-trace, .data, .hprof, or .txt according to the action."),
+			reset: z.boolean().optional().describe("For frame_stats: reset accumulated gfxinfo counters instead of reading them."),
+			includeReport: z.boolean().optional().describe("For stopping Simpleperf: also save a bounded device-side text report. Default true."),
+		},
+		{ destructiveHint: true, idempotentHint: false },
+		async ({ device, action, kind, packageName, durationSeconds, frequencyHz, output, reset, includeReport }) => {
+			const requirePackage = (): string => {
+				if (!packageName) {
+					throw new ActionableError(`mobile_performance action ${action} requires packageName.`);
+				}
+				return packageName;
+			};
+			if (action === "capabilities") {
+				return JSON.stringify(performance.capabilities(device, packageName));
+			}
+			if (action === "status") {
+				return JSON.stringify({ device, active: performance.status(device) });
+			}
+			if (action === "start") {
+				if (!kind) {
+					throw new ActionableError("mobile_performance action start requires kind: perfetto or simpleperf.");
+				}
+				performance.start(device, kind, requirePackage(), durationSeconds, frequencyHz);
+				return JSON.stringify({ device, active: performance.status(device) });
+			}
+			if (action === "stop") {
+				return JSON.stringify(await performance.stop(device, output, includeReport));
+			}
+			if (action === "frame_stats") {
+				return JSON.stringify(performance.frameStats(device, requirePackage(), reset, output));
+			}
+			if (action === "memory") {
+				return JSON.stringify(performance.memorySnapshot(device, requirePackage(), output));
+			}
+			return JSON.stringify(await performance.heapDump(device, requirePackage(), output));
 		}
 	);
 

@@ -83,7 +83,7 @@ Both arrangements are supported — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 
 ---
 
-## The 37 tools
+## The 38 tools
 
 Full reference with every parameter: **[docs/TOOLS.md](docs/TOOLS.md)**.
 
@@ -113,7 +113,8 @@ fold/posture)
 
 **Diagnostics**
 `mobile_logcat` · `mobile_list_crashes` · `mobile_get_crash` · `mobile_start_screen_recording` ·
-`mobile_stop_screen_recording` · `mobile_watch` (live scrcpy mirror) · `mobile_agent_status`
+`mobile_stop_screen_recording` · `mobile_watch` (live scrcpy mirror) · `mobile_performance`
+(Perfetto, Simpleperf, frame, memory and heap evidence) · `mobile_agent_status`
 
 ### One call per journey
 
@@ -160,6 +161,12 @@ The details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the short versi
 - **Errors an agent can act on.** A missed selector fails with the tags actually on screen. An
   agent-only tool names the exact command to start the agent. `mobile_agent_status` reports what is
   configured *and* what is installed, so the commonest setup mistake explains itself.
+
+- **Evidence, not benchmark theatre.** `mobile_performance` wraps focused Perfetto/Simpleperf
+  capture, frame stats, memory snapshots and heap dumps in one action-oriented tool. For regression
+  numbers, use release-like [AndroidX Macrobenchmark](https://developer.android.com/topic/performance/benchmarking/macrobenchmark-overview)
+  runs on physical hardware; emulator timings are useful diagnostically, not as stable absolute
+  measurements.
 
 ---
 

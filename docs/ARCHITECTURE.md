@@ -10,7 +10,7 @@ the wire.
         ▼
    ┌─────────────────────────────────────────────┐
    │ host server  (TypeScript, src/)             │
-   │  · 37 tools                                 │
+   │  · 38 tools                                 │
    │  · device resolution + per-device locking   │
    │  · picks a transport per call               │
    └───────────┬─────────────────────┬───────────┘
@@ -241,6 +241,12 @@ imagery, or rendering itself is the question.
 `mobile_run_steps` exists for the same reason — a 9-step journey as one call is ~123 tokens and one
 round trip, against a step-per-call shape that costs an order of magnitude more of both.
 
+Performance evidence follows the same rule. One `mobile_performance` tool multiplexes collector
+discovery, capture lifecycle, frame stats, memory and heap dumps. Large text is returned in a
+bounded preview and can be written in full to an artifact, avoiding both tool-catalog expansion and
+accidental context floods. Small JSON results also use MCP structured content; large diagnostics
+are not duplicated into both result forms.
+
 ---
 
 ## 7. Known limits
@@ -260,3 +266,6 @@ round trip, against a step-per-call shape that costs an order of magnitude more 
 - **stdio only.** Upstream's Express/SSE listener and its `express`/`qs`/`commander`/`ajv`
   dependencies were removed: a local tool driving real developer devices should not carry a network
   listener with no caller.
+- **Focused traces are not benchmarks.** Perfetto and Simpleperf explain one journey. Stable
+  regression claims belong in AndroidX Macrobenchmark on physical hardware and a release-like,
+  profileable build.

@@ -38,7 +38,15 @@ See [NOTICE](NOTICE) for the full list of modifications.
 - The `am instrument` restart guard now applies only in embedded mode, where it is real.
 - `mobile_agent_status` reports the configured identity, the mode, and — when the agent is absent —
   the instrumentations actually installed, so a mismatch explains itself.
-- 37 tools, stdio only. Upstream's Express/SSE listener and its dependency tree were removed.
+- 38 tools, stdio only. Upstream's Express/SSE listener and its dependency tree were removed.
+- Added one consolidated `mobile_performance` surface for Perfetto and Simpleperf capture, gfxinfo
+  frame stats, meminfo snapshots and HPROF artifacts. Inline diagnostics are bounded while full
+  evidence can be saved locally.
+- Migrated the host to the stable MCP TypeScript SDK 2.0 packages and MCP 2026-era server factory,
+  while retaining legacy-client handshake compatibility. Tools publish safety annotations and
+  small JSON results as structured content without duplicating large diagnostics.
+- Updated production dependencies to `@modelcontextprotocol/server` 2.0.0,
+  `fast-xml-parser` 5.11.1 and Zod 4.5.4; production and full npm audits are clean.
 - No telemetry.
 
 ### Removed from upstream

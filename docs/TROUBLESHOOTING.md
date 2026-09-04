@@ -138,6 +138,17 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" npm run 
 AGP 9 applies the Kotlin plugin itself; adding `org.jetbrains.kotlin.android` alongside it is an
 error, not a redundancy.
 
+## A performance capture will not start or stop
+
+Call `mobile_performance` with `action: "capabilities"` and the target package first. Perfetto
+requires Android 9/API 28+, and app-scoped Simpleperf collection may require a debuggable or
+profileable build. Only one capture can be active per device. If `stop` cannot pull a finalized
+artifact, the session remains visible through `status` so `stop` can be retried.
+
+For a stable performance regression gate, use AndroidX Macrobenchmark with a release-like build on
+physical hardware. This MCP's emulator captures are intended to locate jank, hot code and memory
+growth in one focused flow.
+
 ## Still stuck
 
 Open an issue with the output of `mobile_agent_status`, your `adb devices -l`, and the device's API

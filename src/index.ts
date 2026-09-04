@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { createMcpServer } from "./server";
 import { error } from "./logger";
 
@@ -11,11 +11,6 @@ import { error } from "./logger";
  */
 const main = async () => {
 	try {
-		const transport = new StdioServerTransport();
-
-		const server = createMcpServer();
-		await server.connect(transport);
-
 		// Exit cleanly on termination signals so node flushes pending work
 		// (including NODE_V8_COVERAGE output). Node's default SIGINT/SIGTERM
 		// handling terminates the process without writing the coverage file,
@@ -27,6 +22,7 @@ const main = async () => {
 		process.on("SIGINT", shutdown);
 		process.on("SIGTERM", shutdown);
 
+		serveStdio(createMcpServer);
 		error("android-agent-mcp running on stdio");
 	} catch (err: any) {
 		console.error("Fatal error in main():", err);

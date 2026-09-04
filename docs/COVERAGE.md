@@ -1,9 +1,9 @@
 # Coverage matrix — android-agent-mcp vs the iOS simulator tooling
 
-Date anchor: 2026-08-05. Refreshed 2026-08-29 at protocol 6 (standalone driver, on-device
+Date anchor: 2026-08-05. Refreshed 2026-09-05 at protocol 6 (standalone driver, on-device
 screenshot scaling, visibility end-to-end, recording pull, device auto-resolution,
 per-device serialization, `mobile_device_state` / `mobile_app_state`, `mobile_emulator`,
-`mobile_watch`, tree diff mode).
+`mobile_watch`, tree diff mode, focused performance evidence).
 
 The bar is the iOS Simulator tooling an LLM agent can realistically reach today: the
 action-multiplexed `control` tool Claude Code ships with, plus the stronger XcodeBuildMCP
@@ -46,6 +46,7 @@ Legend: ✅ have · ⬆ have, structurally stronger · ❌ gap · — not applic
 | Logs (app/system) | ❌ | ✅ sim log capture | ✅ `mobile_logcat` — pid-scoped, priority/tag filters, marker-based "since", crash buffer, byte-capped |
 | Crash capture | ❌ | ✅ | ✅ `mobile_list_crashes` / `mobile_get_crash` (DropBox: java crash, native crash, ANR, WTF) |
 | ANR capture | ❌ | — | ✅ via DropBox `data_app_anr` entries |
+| Performance evidence | ❌ | ✅ Instruments-oriented | ✅ `mobile_performance`: Perfetto system trace, Simpleperf CPU samples, gfxinfo frame stats, meminfo and HPROF artifacts; capability/profileable preflight |
 | Assertions | ❌ | ❌ | ⬆ `mobile_assert` — exists/visible/textEquals/minCount/foregroundPackage with evidence; `visible` checks the node's real isVisibleToUser (agent transport), honestly reported unknown over adb |
 
 ## Determinism
