@@ -1,6 +1,5 @@
 # android-agent-mcp
 
-[![CI](https://github.com/baiamansama/android-agent-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/baiamansama/android-agent-mcp/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 An MCP server that lets an LLM agent drive a real Android device or emulator — and does it by
