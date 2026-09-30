@@ -4,8 +4,17 @@ import { PNG } from "../src/png";
 import { AndroidRobot, AndroidDeviceManager, WIDTH_CLASS_TARGET_DP, heightClassFor, widthClassFor } from "../src/android";
 import { parseWindowSize } from "../src/server";
 
+/**
+ * Opt-in gate for every test that touches a real device: `ANDROID_AGENT_DEVICE_TESTS=1`.
+ *
+ * These tests press HOME, open URLs, clear app data and rotate and resize the display. Attached
+ * devices are routinely shared — another agent session, or a person — and a plain `npm test`
+ * once opened Chrome over an app another session was driving (2026-09-30). So a device being
+ * connected is not consent; the variable is. Without it not even `adb devices` runs.
+ */
+const deviceTests = process.env.ANDROID_AGENT_DEVICE_TESTS === "1";
 const manager = new AndroidDeviceManager();
-const devices = manager.getConnectedDevices();
+const devices = deviceTests ? manager.getConnectedDevices() : [];
 const hasOneAndroidDevice = devices.length === 1;
 
 /**
@@ -31,6 +40,8 @@ const hasPackage = (name: string): boolean => installedPackages.includes(name);
 const thirdPartyE2E = process.env.ANDROID_AGENT_THIRD_PARTY_E2E === "1";
 
 test.describe("android", () => {
+
+	test.skip(!deviceTests, "device tests are opt-in: ANDROID_AGENT_DEVICE_TESTS=1");
 
 	const android = new AndroidRobot(devices?.[0]?.deviceId || "");
 

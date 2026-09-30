@@ -49,6 +49,8 @@ Measured on Pixel 10 and Pixel Tablet emulators (API 37.1); numbers in
   (`npm run agent:bundle`), or this repo's Gradle output. `ANDROID_AGENT_AUTO_INSTALL=0` turns it
   off; `mobile_agent_status` reports what happened.
 - `@modelcontextprotocol/server` 2.0.0 → 2.2.0.
+- `npm test` never touches an attached device; device tests need `ANDROID_AGENT_DEVICE_TESTS=1`.
+- The CI workflow was removed; run the checks locally.
 
 ## Unreleased
 

@@ -14,11 +14,13 @@ npm run lint
 npm test
 ```
 
-`npm test` is Playwright's runner over unit tests; it needs no device. Two suites are opt-in
-because they drive a real device:
+`npm test` is Playwright's runner over unit tests; it needs no device and never touches one,
+even when one is attached. Device tests are opt-in, because they press HOME, open URLs and rotate
+the display of whatever is connected — often an emulator someone else is using:
 
 ```bash
-ANDROID_AGENT_THIRD_PARTY_E2E=1 npm test
+ANDROID_AGENT_DEVICE_TESTS=1 npm test                                    # device-backed tests
+ANDROID_AGENT_DEVICE_TESTS=1 ANDROID_AGENT_THIRD_PARTY_E2E=1 npm test    # plus Chrome/Clock E2E
 ```
 
 To work on the agent:
