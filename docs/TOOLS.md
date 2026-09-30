@@ -1,6 +1,6 @@
 # Tool reference
 
-38 tools. Generated from the server's own schemas, so the descriptions here are the ones your MCP
+31 tools. Generated from the server's own schemas, so the descriptions here are the ones your MCP
 client actually receives.
 
 `device` is accepted by every tool except `mobile_list_available_devices` and is **optional**: when
@@ -16,22 +16,21 @@ the command to start it. Everything else works on either transport. See
 Everything here is cheap and safe to repeat. Prefer the element list to a screenshot: it answers "what is on screen" faster, costs far fewer tokens, and its `#tags` feed the element tools directly.
 
 ### `mobile_list_elements_on_screen`
-The screen as a compact semantic tree: one element per line — `#test-tag "text" (label) Type @x,y wxh clickable scrollable hidden`. Prefer this over screenshots; it is faster and cheaper, and the #tags feed mobile_tap_on_element directly. `hidden` marks nodes present but not visible to the user (agent transport only) — never plan a tap on one. The header reports `transport` (agent = live in-process tree; adb = XML dump without visibility) and `foreground` — if foreground is not the app you expect, the tree belongs to something else. diff:true returns only lines added (+) and removed (-) since the previous list call, which is much cheaper after a small change. Do not cache this result.
+The screen as compact lines, one per thing a person would point at: `#test-tag "text" (label) Type @x,y wxh` plus flags clickable, focused, scrollable, disabled, selected, checked/unchecked, hidden. Prefer this over screenshots; #tags feed the selector tools directly. A clickable container shows the words inside it; `hidden` is present but not visible (agent transport only) — never plan a tap on one. The header's `foreground` names the app the tree belongs to. With id/idPrefix/text it returns only the matches, numbered by the index the action tools accept. diff:true returns only lines added (+) and removed (-) since the previous list. Do not cache this result.
 
 | Parameter | Type | |
 |---|---|---|
+| `id` | `string` | Only elements with this exact test tag / resource-id |
+| `idPrefix` | `string` | Only elements whose tag starts with this, e.g. shell.dock. |
+| `text` | `string` | Only elements whose text or label contains this (diacritics and bidi marks folded) |
 | `filter` | `all` \| `interactive` | interactive returns only clickable/focused elements and named fields — the actionable subset. Default all. |
 | `verbose` | `boolean` | Return the legacy JSON element objects instead of compact lines. Costs roughly 3x the tokens. |
 | `diff` | `boolean` | Return only the change against the previous list call: `+` added lines, `-` removed lines. Falls back to the full tree when there is no baseline. |
 
-### `mobile_find_elements`
-Find elements by test tag, tag prefix, or lenient text match, without tapping. Returns the matches most-specific first. Use idPrefix to enumerate a family such as shell.dock. — useful for discovering what a screen exposes.
-
-| Parameter | Type | |
-|---|---|---|
-| `id` | `string` | Exact test tag / resource-id |
-| `idPrefix` | `string` | Test tag prefix, e.g. shell.dock. |
-| `text` | `string` | Visible text or accessibility label. Matched leniently. |
+Compact lines are presentation only; selectors always resolve against the raw tree. Framework
+wrappers are dropped, nodes sharing one rectangle fuse, a clickable container shows the words
+inside it, bidi isolates are stripped, and an open soft keyboard collapses to one line. On a real
+dictionary screen with the keyboard up (2026-09-30) that is 183 raw nodes in 21 lines.
 
 ### `mobile_list_windows` · **agent**
 List every application and IME window, topmost first, with the package that owns each and which one is in the foreground. Use this when a dump looks like it belongs to the wrong app, when a dialog or bottom sheet may be covering the screen, or before asserting that the app under test is actually in front. Requires the in-process agent.
@@ -42,19 +41,8 @@ Screenshot, downscaled and compressed on the device for token economy. This is t
 | Parameter | Type | |
 |---|---|---|
 | `maxWidth` | `number` | Longest acceptable image width in pixels. Default: device width divided by display scale, floored at 480 for legibility. |
+| `saveTo` | `string` | Instead of returning an image, save a full-resolution PNG/JPEG to this host path (.png, .jpg, .jpeg) and return the path. |
 | `quality` | `number` | JPEG quality. Default 75. |
-
-### `mobile_save_screenshot`
-Save a full-resolution screenshot of the mobile device to a file
-
-| Parameter | Type | |
-|---|---|---|
-| `saveTo` *(required)* | `string` | The path to save the screenshot to. Filename must end with .png, .jpg, or .jpeg |
-
-### `mobile_get_screen_size`
-Screen geometry in pixels and in dp, with the androidx window size class the window falls in. The dp width is what adaptive layouts branch on — pixels alone cannot tell a 1280dp tablet from a 900dp one, and both report as "a tablet". Coordinates for every other tool in this server are in pixels.
-
-Width classes are `compact` (<600dp), `medium` (600–839), `expanded` (840–1199), `large` (1200–1599) and `extraLarge` (≥1600); height classes are `compact` (<480dp), `medium` (480–899) and `expanded` (≥900). The breakpoints are `androidx.window.core.layout.WindowSizeClass`'s, so the class reported here is the class the app under test branched on.
 
 ---
 
@@ -62,14 +50,21 @@ Width classes are `compact` (<600dp), `medium` (600–839), `expanded` (840–11
 The preferred way to act. A selector is a test tag (`id`), a tag prefix (`idPrefix`), or `text` matched after folding bidi isolates, Arabic diacritics, hamza/alef forms, Uzbek apostrophe variants, case and whitespace. A text selector never resolves to the soft keyboard's own keys.
 
 ### `mobile_tap_on_element`
-Tap (or long-press) an element by its Compose test tag or by its visible text. Prefer this over tapping coordinates: a tag survives relayout, scrolling and translation, whereas coordinates do not. Text matching ignores Arabic diacritics, bidi isolates and Uzbek apostrophe variants, and never resolves to the soft keyboard's own keys.
+Tap (or long-press) an element by test tag, tag prefix, or visible text — prefer this over coordinates, which break on relayout and scrolling. Text matching folds Arabic diacritics, bidi isolates and Uzbek apostrophe variants and never resolves to keyboard keys. The result says whether the screen changed and how many elements matched.
 
 | Parameter | Type | |
 |---|---|---|
 | `id` | `string` | Exact test tag / resource-id, e.g. shell.dock.library |
 | `idPrefix` | `string` | Test tag prefix — taps the best (visible-first) member of a family, e.g. dictionary.search.result. for the first search result |
 | `text` | `string` | Visible text or accessibility label. Matched leniently. |
+| `index` | `integer` | Pick the Nth match (0-based, visible first) when the selector matches several. Default 0. |
 | `longPress` | `boolean` | Long-press instead of tapping — context menus, drag-mode entry, word selection. |
+
+The result says how the tap landed: `(screen changed)` for a node action that moved the screen;
+a real-tap follow-up when the node action had no visible effect; and **"the screen did not change"**
+when neither did — a disabled, dead, or correctly no-op control. `N elements matched; pass index`
+flags an ambiguous selector. A missed selector is an `isError` result listing the screen's test
+tags, with generated families collapsed (`dictionary.search.result.* (6)`).
 
 ### `mobile_set_text` · **agent**
 Replace a named field's contents. Unicode-safe: handles Arabic, Cyrillic and Uzbek U+02BB with no keyboard installed, which adb text entry cannot do. Empty string clears the field. To append at the cursor instead, use mobile_type_keys. Requires the in-process agent; mobile_agent_status reports whether it is running.
@@ -79,6 +74,7 @@ Replace a named field's contents. Unicode-safe: handles Arabic, Cyrillic and Uzb
 | `id` | `string` | Test tag / resource-id of the field |
 | `text` | `string` | Visible text or label identifying the field |
 | `value` *(required)* | `string` | Text to write. Empty string clears the field. |
+| `index` | `integer` | Pick the Nth match (0-based, visible first) when the selector matches several. Default 0. |
 
 ### `mobile_scroll_into_view`
 Scroll a named element into view through its nearest scrollable container, then return it. Use this instead of repeated swipe-and-screenshot loops: it stops as soon as the element is visible and reports when the container has run out of content. Requires the in-process agent.
@@ -104,29 +100,15 @@ Type text into the focused field, appending at the cursor — Unicode-safe (Arab
 For when there is nothing to name — a canvas, a map, a game surface — or when you are reproducing an exact gesture. Coordinates are device pixels, the same space element bounds are reported in.
 
 ### `mobile_click_on_screen_at_coordinates`
-Click on the screen at given x,y coordinates. If clicking on an element, use the list_elements_on_screen tool to find the coordinates.
+Tap at device-pixel coordinates — the fallback when no selector reaches the target (prefer mobile_tap_on_element). count:2 double-taps inside the platform's double-tap window (agent transport; over adb two taps may register as singles). longPress holds for duration ms.
 
 | Parameter | Type | |
 |---|---|---|
-| `x` *(required)* | `number` | The x coordinate to click on the screen, in pixels |
-| `y` *(required)* | `number` | The y coordinate to click on the screen, in pixels |
-
-### `mobile_double_tap_on_screen` · **agent**
-Double-tap on the screen at given x,y coordinates. Through the in-process agent both taps are injected inside the platform's double-tap window; over adb the two taps land too far apart and may register as two singles.
-
-| Parameter | Type | |
-|---|---|---|
-| `x` *(required)* | `number` | The x coordinate to double-tap, in pixels |
-| `y` *(required)* | `number` | The y coordinate to double-tap, in pixels |
-
-### `mobile_long_press_on_screen_at_coordinates`
-Long press on the screen at given x,y coordinates. If long pressing on an element, use the list_elements_on_screen tool to find the coordinates.
-
-| Parameter | Type | |
-|---|---|---|
-| `x` *(required)* | `number` | The x coordinate to long press on the screen, in pixels |
-| `y` *(required)* | `number` | The y coordinate to long press on the screen, in pixels |
-| `duration` | `number` | Duration of the long press in milliseconds. Defaults to 500ms. |
+| `x` *(required)* | `number` | X in device pixels |
+| `y` *(required)* | `number` | Y in device pixels |
+| `count` | `integer` | 2 for a double-tap. Default 1. |
+| `longPress` | `boolean` | Press and hold instead of tapping. |
+| `duration` | `number` | Long-press hold in ms. Default 500. |
 
 ### `mobile_swipe_on_screen`
 Swipe on the screen. Direction is FINGER direction: swiping up scrolls the content down.
@@ -202,16 +184,21 @@ Assert something about the screen, waiting up to timeoutMs for it to come true �
 | `timeoutMs` | `number` | How long to keep re-checking before declaring failure. Default 4000. 0 = single immediate check. |
 
 `foregroundPackage` may be asserted by itself. Element expectations require one of `id`,
-`idPrefix`, or `text`.
+`idPrefix`, or `text`. A pass is one line (`ASSERTION PASSED idPrefix="shell.dock.", 4 matches
+(6ms)`); a failure is an `isError` result carrying every check and the best match.
 
 ### `mobile_run_steps`
-Run a whole journey in one call, settling between steps: launch, tap, long-press, set Unicode text, scroll to an element, assert, press buttons, swipe. Stops at the first failing step with per-step timings, so one call replaces five round trips and the log says exactly where and why it stopped. Set snapshot:true to receive the final screen's compact element tree in the same result — saving the follow-up list call.
+Run a whole journey in one call, settling between steps: launch, tap, long-press, set Unicode text, scroll to an element, assert, press buttons, swipe. Stops at the first failing step with per-step timings, so one call replaces five round trips and the log says exactly where and why it stopped. Set snapshot to receive the final screen in the same result (true = full compact tree, "interactive" = actionable lines only), saving the follow-up list call.
 
 | Parameter | Type | |
 |---|---|---|
 | `steps` *(required)* | `array` | Steps, executed in order |
 | `settle` | `boolean` | Wait for the UI to settle between steps. Default true. |
-| `snapshot` | `boolean` | Append the final screen's compact element tree to the result. Default false. |
+| `snapshot` | `union` | Append the final screen: true = compact tree, "interactive" = actionable lines only. Default false. |
+
+Each step takes one action: `launch`, `relaunch`, `tapId` / `tapIdPrefix` / `tapText` (with
+`index`, `longPress`), `setText`, `type`, `button`, `swipe`, `scrollToId` / `scrollToText`, or
+`assert`. A journey that stops early is an `isError` result whose log names the failing step.
 
 ---
 
@@ -224,7 +211,7 @@ List connected Android devices and emulators. This fork is Android-only. Rarely 
 List all the installed apps on the device
 
 ### `mobile_launch_app`
-Launch an app on mobile device. Use this to open a specific app. You can find the package name of the app by calling list_apps_on_device.
+Launch an app on mobile device. Use this to open a specific app. Find the package name with mobile_list_apps.
 
 | Parameter | Type | |
 |---|---|---|
@@ -288,6 +275,8 @@ deliberately: the Material reflow bugs this is for live at a width band crossed 
 (`SupportingPaneScaffold` reflows its supporting pane under the main one at width 600–840dp and
 height ≥900dp), and a resize that moved both would step straight over them.
 
+Width classes are `compact` (<600dp), `medium` (600–839), `expanded` (840–1199), `large` (1200–1599) and `extraLarge` (≥1600); height classes are `compact` (<480dp), `medium` (480–899) and `expanded` (≥900). The breakpoints are `androidx.window.core.layout.WindowSizeClass`'s, so the class reported here is the class the app under test branched on.
+
 Two measured details it handles for you. `wm size` does not resize the current window — it redefines
 the display's **natural** frame, and the live window is that frame turned by `user_rotation`; writing
 a size therefore silently changes what an already-written rotation means. On the Pixel Tablet AVD
@@ -325,31 +314,23 @@ Read logcat, scoped to stay quotable: by app (pid-filtered), priority, tag, and 
 | `mark` | `boolean` | Stamp now as the mark for sinceMark and return without reading |
 | `sinceMark` | `boolean` | Only lines after the last mark for this device |
 
-### `mobile_list_crashes`
-List crash, ANR, native-crash and WTF entries from the device's DropBox, most recent last. Each entry is `<date> <time> <tag>`; pass the tag (optionally with the timestamp) to mobile_get_crash. Fast: reads the index, not the reports.
+### `mobile_crashes`
+Crash, ANR, native-crash and WTF reports from the device's DropBox. Without id: the index, most recent last, one `<date> <time> <tag>` per entry (fast; reads no reports). With id: that report's content, tail-capped because the stack trace is at the end — pass a tag such as data_app_crash, optionally prefixed with an entry's date and time to pick one.
 
 | Parameter | Type | |
 |---|---|---|
-| `limit` | `number` | Most recent N entries. Default 20. |
+| `id` | `string` | DropBox tag, optionally prefixed with the entry's date and time. Omit to list. |
+| `limit` | `number` | Listing: most recent N entries. Default 20. |
+| `maxBytes` | `number` | Report: keep at most this many bytes from the end. Default 16384. |
 
-### `mobile_get_crash`
-Get the content of a crash/ANR report by its DropBox tag, e.g. data_app_crash or data_app_anr — optionally preceded by the `YYYY-mm-dd HH:MM:SS` timestamp from mobile_list_crashes to select one specific entry. Output is tail-capped; the stack trace lives at the end, which is the part that survives.
-
-| Parameter | Type | |
-|---|---|---|
-| `id` *(required)* | `string` | DropBox tag, optionally prefixed with the entry's date and time |
-| `maxBytes` | `number` | Keep at most this many bytes from the end. Default 16384. |
-
-### `mobile_start_screen_recording`
-Start recording the screen of a mobile device. The recording runs in the background until stopped with mobile_stop_screen_recording. Returns the path where the recording will be saved.
+### `mobile_screen_recording`
+Record the screen to an .mp4 on the host. action start begins recording in the background (unlimited length on API 34+ unless timeLimit is set); action stop finalizes it on the device, pulls it, and reports path, size and duration.
 
 | Parameter | Type | |
 |---|---|---|
-| `output` | `string` | The file path to save the recording to. Filename must end with .mp4. If not provided, a temporary path will be used. |
-| `timeLimit` | `number` | Maximum recording duration in seconds. The recording will stop automatically after this time. |
-
-### `mobile_stop_screen_recording`
-Stop an active screen recording, finalize it on the device, and pull the .mp4 to the host. Returns the file path, size, and approximate duration.
+| `action` *(required)* | `start` \| `stop` | start or stop |
+| `output` | `string` | For start: host path ending in .mp4. Default: a temp file. |
+| `timeLimit` | `number` | For start: stop automatically after this many seconds. |
 
 ### `mobile_watch`
 Open or close a live mirror window of the device on this Mac via scrcpy, so a human can watch the automation as it happens — the Android counterpart of the iOS simulator panel. Mainly for physical devices; an emulator usually already shows its own window. Requires scrcpy (brew install scrcpy). The window closes when this server exits.

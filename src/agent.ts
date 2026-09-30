@@ -1,8 +1,10 @@
 import { execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 
 import { getAdbPath } from "./android";
-import { AgentIdentity, INSTRUMENTATION_RUNNER, agentStartHint as startHint, resolveAgentIdentity } from "./config";
+import { AgentIdentity, INSTRUMENTATION_RUNNER, agentStartHint as startHint, autoInstallEnabled, resolveAgentIdentity, resolveDriverApks } from "./config";
 import { ActionableError, ScreenElement } from "./robot";
 
 /**
@@ -98,6 +100,12 @@ export interface AgentElement {
 	/** Package owning that window. Lets a caller spot a match that is not in the app under test. */
 	package?: string | null;
 	scrollable?: boolean;
+	/** Protocol 7+. */
+	selected?: boolean;
+	/** Protocol 7+, present only on checkable nodes. */
+	checked?: boolean;
+	/** Protocol 7+: the node belongs to the soft keyboard's window. */
+	ime?: boolean;
 }
 
 export const toScreenElement = (element: AgentElement): ScreenElement => {
@@ -127,8 +135,43 @@ export const toScreenElement = (element: AgentElement): ScreenElement => {
 	if (element.scrollable) {
 		screenElement.scrollable = true;
 	}
+	if (element.enabled === false) {
+		screenElement.enabled = false;
+	}
+	if (element.selected) {
+		screenElement.selected = true;
+	}
+	if (element.checked !== undefined) {
+		screenElement.checked = element.checked;
+	}
+	if (element.ime) {
+		screenElement.ime = true;
+	}
 	return screenElement;
 };
+
+/** A selector as the agent understands it. `index` picks among matches, visible ones first. */
+export interface AgentSelector {
+	id?: string;
+	idPrefix?: string;
+	text?: string;
+	index?: number;
+}
+
+/**
+ * What a click actually did, as the agent observed it.
+ *
+ * `method` is `node` when the accessibility action changed the screen and `gesture` when a real tap
+ * had to follow; `changed` is present only after a gesture and is false when even that moved
+ * nothing. Reporting these is the difference between "tapped" and "tapped, and the screen
+ * responded" — a caller that is told only the first cannot tell a dead button from a live one.
+ */
+export interface ActionOutcome {
+	target?: AgentElement;
+	method?: string;
+	changed?: boolean;
+	matchCount?: number;
+}
 
 /** One application or IME window, topmost first. */
 export interface AgentWindow {
@@ -174,6 +217,9 @@ interface AgentResponse {
 	deviceHeight?: number;
 	format?: string;
 	data?: string;
+	method?: string;
+	changed?: boolean;
+	matchCount?: number;
 }
 
 /**
@@ -184,10 +230,12 @@ interface AgentResponse {
  * missing field. `DeviceAgent.PROTOCOL` in `agent/` is the other half of this pair; the two must
  * be changed together.
  *
+ * 7 — every read clears the accessibility cache first; `selected`, `checked` and `ime` on elements;
+ *     `index` on selectors; `matchCount` on click and longClick.
  * 6 — `capabilities` op added; `setText` tries ACTION_SET_TEXT before the clipboard path.
  * 5 — on-device screenshot scaling, per-node visibility, window stack.
  */
-export const AGENT_PROTOCOL = 6;
+export const AGENT_PROTOCOL = 7;
 
 /**
  * A request that reached the agent but got no answer in time.
@@ -396,6 +444,13 @@ export class AgentClient {
 			return true;
 		}
 
+		// A missing driver, or one speaking another protocol, is the most common reason the fast
+		// path is silently off. When a matching driver is available locally, installing it is free:
+		// it is this tool's own package, and in standalone mode nothing else restarts.
+		if (this.protocolMismatch !== null || !this.testApkInstalled()) {
+			this.installBundledDriver();
+		}
+
 		// No test APK, no agent — answer from a cached ~40ms check instead of paying a 6s spawn
 		// poll on every launch in environments that never installed it.
 		if (!this.testApkInstalled()) {
@@ -456,6 +511,46 @@ export class AgentClient {
 
 	/** Cached "is the test APK installed" answer; cleared by [invalidate] when an install occurs. */
 	private testApkPresent: boolean | null = null;
+
+	/** Set once an install has been attempted, so a failing install is not retried on every call. */
+	private driverInstallAttempted = false;
+
+	/** Result of the last automatic install, for status reporting. */
+	public driverInstall: { installed: boolean; from?: string; error?: string } | null = null;
+
+	/**
+	 * Install the standalone driver from a local build, at most once per server lifetime.
+	 *
+	 * Standalone only: an embedded agent lives in the caller's own app build, which this server has
+	 * no business replacing. Stops any running instrumentation first so the new APK is what serves.
+	 */
+	private installBundledDriver(): void {
+		if (this.driverInstallAttempted || !autoInstallEnabled(AGENT_IDENTITY)) {
+			return;
+		}
+		this.driverInstallAttempted = true;
+		const apks = resolveDriverApks(path.resolve(__dirname, ".."), fs.existsSync, path.join);
+		if (!apks) {
+			return;
+		}
+		try {
+			this.stop();
+			for (const apk of [apks.app, apks.test]) {
+				execFileSync(getAdbPath(), ["-s", this.deviceId, "install", "-r", "-t", apk], {
+					encoding: "utf8",
+					timeout: 120_000,
+					stdio: ["pipe", "pipe", "pipe"],
+				});
+			}
+			this.testApkPresent = true;
+			this.protocolMismatch = null;
+			this.forwarded = false;
+			this.driverInstall = { installed: true, from: path.dirname(apks.test) };
+		} catch (error: any) {
+			this.testApkPresent = null;
+			this.driverInstall = { installed: false, error: (error.stderr?.toString() || error.message || "").split("\n")[0] };
+		}
+	}
 
 	private testApkInstalled(): boolean {
 		if (this.testApkPresent !== null) {
@@ -533,12 +628,16 @@ export class AgentClient {
 		return { elements: response.elements, foreground: response.foreground ?? null };
 	}
 
-	public async click(selector: { id?: string; idPrefix?: string; text?: string }): Promise<AgentElement | undefined> {
-		const response = await this.request({ op: "click", ...selector }, 15000);
+	public async click(selector: AgentSelector): Promise<ActionOutcome> {
+		return this.act("click", selector);
+	}
+
+	private async act(op: "click" | "longClick", selector: AgentSelector): Promise<ActionOutcome> {
+		const response = await this.request({ op, ...selector }, 15000);
 		if (!response.ok) {
-			throw new ActionableError(response.error || "Agent click failed");
+			throw new ActionableError(response.error || `Agent ${op} failed`);
 		}
-		return response.target;
+		return { target: response.target, method: response.method, changed: response.changed, matchCount: response.matchCount };
 	}
 
 	/**
@@ -551,7 +650,7 @@ export class AgentClient {
 	 * Passing an empty string with replace clears the field, per the ACTION_SET_TEXT contract.
 	 */
 	public async setText(
-		selector: { id?: string; text?: string },
+		selector: AgentSelector,
 		value: string,
 		mode: "replace" | "append" = "replace",
 	): Promise<AgentElement | undefined> {
@@ -566,12 +665,8 @@ export class AgentClient {
 		await this.request({ op: "waitIdle", timeoutMs }, timeoutMs + 5000);
 	}
 
-	public async longClick(selector: { id?: string; idPrefix?: string; text?: string }): Promise<AgentElement | undefined> {
-		const response = await this.request({ op: "longClick", ...selector }, 15000);
-		if (!response.ok) {
-			throw new ActionableError(response.error || "Agent longClick failed");
-		}
-		return response.target;
+	public async longClick(selector: AgentSelector): Promise<ActionOutcome> {
+		return this.act("longClick", selector);
 	}
 
 	/** Every application and IME window, topmost first, plus which package owns the foreground. */
@@ -615,7 +710,7 @@ export class AgentClient {
 
 	/** Scroll a node into view through its nearest scrollable ancestor. */
 	public async scrollIntoView(
-		selector: { id?: string; idPrefix?: string; text?: string },
+		selector: AgentSelector,
 		maxScrolls?: number,
 	): Promise<AgentElement | undefined> {
 		const response = await this.request({ op: "scrollIntoView", ...selector, maxScrolls }, 45000);

@@ -12,3 +12,6 @@ agent/.gradle
 agent/build
 agent/*/build
 agent/local.properties
+
+# Driver APKs bundled for packaging (npm run agent:bundle)
+driver/

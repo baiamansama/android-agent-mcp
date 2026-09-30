@@ -4,8 +4,10 @@ import {
 	DEFAULT_DRIVER_PACKAGE,
 	DEFAULT_DRIVER_TEST_PACKAGE,
 	agentStartHint,
+	autoInstallEnabled,
 	parseInstrumentations,
 	resolveAgentIdentity,
+	resolveDriverApks,
 } from "../src/config";
 
 /**
@@ -147,5 +149,32 @@ test.describe("config", () => {
 			expect(hint).toContain("com.example.app.agent.DeviceAgent");
 			expect(hint).toContain("com.example.app.test/androidx.test.runner.AndroidJUnitRunner");
 		});
+	});
+});
+
+test.describe("resolveDriverApks", () => {
+	const join = (...parts: string[]) => parts.join("/");
+
+	test("prefers a packaged driver/ directory over the Gradle output", () => {
+		const present = new Set([
+			"/pkg/driver/driver-debug.apk", "/pkg/driver/driver-debug-androidTest.apk",
+			"/pkg/agent/driver/build/outputs/apk/debug/driver-debug.apk",
+			"/pkg/agent/driver/build/outputs/apk/androidTest/debug/driver-debug-androidTest.apk",
+		]);
+		expect(resolveDriverApks("/pkg", file => present.has(file), join)?.test).toBe("/pkg/driver/driver-debug-androidTest.apk");
+	});
+
+	test("falls back to a source checkout's build output, and needs both APKs", () => {
+		const present = new Set([
+			"/pkg/agent/driver/build/outputs/apk/debug/driver-debug.apk",
+			"/pkg/agent/driver/build/outputs/apk/androidTest/debug/driver-debug-androidTest.apk",
+		]);
+		expect(resolveDriverApks("/pkg", file => present.has(file), join)?.app).toBe("/pkg/agent/driver/build/outputs/apk/debug/driver-debug.apk");
+		expect(resolveDriverApks("/pkg", file => file === "/pkg/driver/driver-debug.apk", join)).toBeNull();
+	});
+
+	test("auto-install never touches an embedded agent", () => {
+		expect(autoInstallEnabled({ targetPackage: "a", testPackage: "a.test", className: "c", mode: "embedded" })).toBe(false);
+		expect(autoInstallEnabled({ targetPackage: "a", testPackage: "a.test", className: "c", mode: "standalone" })).toBe(true);
 	});
 });

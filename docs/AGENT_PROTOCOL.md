@@ -1,6 +1,6 @@
 # Agent wire protocol
 
-**Version 6.** For anyone extending the agent, porting it, or debugging it by hand.
+**Version 7.** For anyone extending the agent, porting it, or debugging it by hand.
 
 The agent (`agent/driver/src/androidTest/.../DeviceAgent.kt`) serves **newline-delimited JSON** over
 a TCP socket bound to `127.0.0.1:8299` on the device. One JSON object per line in, one per line
@@ -52,9 +52,16 @@ Ops that act on a node accept the same selector fields, checked in this order:
 | *(none)* | The currently focused editable node |
 | `package` | Restrict to windows owned by this package |
 | `includeIme` | Include IME windows. **Default false** — Gboard publishes every key as a clickable, visible node, so a text selector would otherwise resolve to the keyboard |
+| `index` | *(7+)* Pick the Nth match, 0-based. Default 0 |
 
-Resolution prefers a visible match, falling back to a hidden one. It ranks rather than filters,
-because "exists but is covered" is more useful to a caller than "not found".
+Matches rank visible first, then in tree order; `index` picks from that list. It ranks rather than
+filters, because "exists but is covered" is more useful to a caller than "not found". The host
+ranks its own matches identically, so an index means the same thing on either transport.
+
+**Every read is fresh (7+).** The agent clears the accessibility node cache before walking any
+window (`UiAutomation.clearCache()` on API 34+, re-applying the service info below that). Compose
+does not report every change to a UiAutomation client, and a cached tree once kept a closed bottom
+sheet `visible` for minutes. See [ARCHITECTURE.md §4](ARCHITECTURE.md#4-verify-dont-trust).
 
 ## Operations
 
@@ -64,8 +71,8 @@ because "exists but is covered" is more useful to a caller than "not found".
 | `capabilities` | — | `protocol`, `sdkInt`, `clipboard`, `shellIdentity` |
 | `dump` | `allWindows` (default true) | `elements[]`, `foreground` |
 | `windows` | — | `windows[]`, `foreground` |
-| `click` | selector, `gestureFallback` (default true) | `target`, `method`, `changed` |
-| `longClick` | selector, `gestureFallback` | `target`, `method`, `changed` |
+| `click` | selector, `gestureFallback` (default true) | `target`, `method`, `changed`, `matchCount` (7+) |
+| `longClick` | selector, `gestureFallback` | `target`, `method`, `changed`, `matchCount` (7+) |
 | `setText` | selector, `value`, `mode` (`replace`\|`append`) | `target`, `method` |
 | `scrollIntoView` | selector, `maxScrolls` (default 12) | `target`, `scrolls` |
 | `screenshot` | `maxWidth`, `format` (`jpeg`\|`png`), `quality` | `data` (base64), `width`, `height`, `deviceWidth`, `deviceHeight`, `format` |
@@ -85,6 +92,7 @@ because "exists but is covered" is more useful to a caller than "not found".
   "className": "android.widget.EditText",
   "clickable": true, "enabled": true, "focused": false,
   "editable": true, "scrollable": false,
+  "selected": false,
   "visible": true,
   "x": 24, "y": 210, "width": 1032, "height": 144,
   "window": 0, "package": "com.example.app"
@@ -95,6 +103,10 @@ because "exists but is covered" is more useful to a caller than "not found".
 cannot provide, and the reason this agent exists. Between API 16 and 29 the platform can report it
 incorrectly while screen magnification is active, so treat it as advisory for ranking rather than a
 hard filter.
+
+`selected` (7+) is the current tab, chip or list selection; `checked` (7+) appears only on checkable
+nodes; `ime: true` (7+) marks nodes of the soft keyboard's window, which the host collapses to one
+line for display.
 
 `window` indexes the window stack (0 = topmost) and `package` names that window's owner, so a
 caller can always tell a match in the app under test from one in a dialog, the IME, or the launcher.
@@ -117,7 +129,7 @@ See [ARCHITECTURE.md §4](ARCHITECTURE.md#4-verify-dont-trust) for why both fall
 ### `capabilities`
 
 ```json
-{"ok": true, "protocol": 6, "sdkInt": 37, "clipboard": true, "shellIdentity": true}
+{"ok": true, "protocol": 7, "sdkInt": 37, "clipboard": true, "shellIdentity": true}
 ```
 
 `clipboard` is **measured, not inferred**: the agent writes a sentinel and reads it back. Android

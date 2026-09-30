@@ -230,14 +230,37 @@ class DeviceAgent {
   private fun uiAutomation() = InstrumentationRegistry.getInstrumentation().uiAutomation
 
   /**
-   * Application windows, topmost first.
+   * Drop the accessibility node cache, so the next read asks the app instead of memory.
+   *
+   * The framework caches every node this connection has fetched and invalidates entries only when
+   * the app reports a change. Compose does not report every change to a UiAutomation client: on
+   * API 37 emulators (2026-09-30) a closed bottom sheet stayed in the tree, `visible` and at its old
+   * bounds, for minutes and through a scroll that moved every row; only a window change refreshed
+   * it. Every consumer downstream inherited the lie — `waitStable` hashed a frozen tree and said
+   * "stable", and [act] saw no change after a click that had navigated, then tapped again.
+   *
+   * Clearing costs one re-fetch per read, which the caps in [walk] keep bounded. API 34 made
+   * `clearCache` public; below that, re-applying the service info is the platform's own cache-clear
+   * path.
+   */
+  private fun freshTree() {
+    val automation = uiAutomation()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      automation.clearCache()
+    } else {
+      automation.serviceInfo = automation.serviceInfo
+    }
+  }
+
+  /**
+   * Application windows, topmost first, read fresh — see [freshTree].
    *
    * Ordered by layer descending so index 0 is what the user is actually looking at. System
    * decorations (status bar, navigation bar) are dropped: they are never the subject of a query and
    * including them makes "which window am I on" ambiguous.
    */
   private fun appWindows(): List<AccessibilityWindowInfo> =
-    uiAutomation().windows
+    freshTree().let { uiAutomation().windows }
       .filter { window ->
         window.type == AccessibilityWindowInfo.TYPE_APPLICATION ||
           window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD
@@ -251,6 +274,7 @@ class DeviceAgent {
    * otherwise receive the launcher's tree believing it was the app's.
    */
   private fun foregroundPackage(): String? {
+    freshTree()
     val active = uiAutomation().windows.firstOrNull { it.isActive && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
       ?: appWindows().firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
     return active?.root?.packageName?.toString()
@@ -306,26 +330,33 @@ class DeviceAgent {
       // No accessible application window — fall back to the active root so a caller mid-transition
       // still gets something rather than an unexplained empty list.
       uiAutomation().rootInActiveWindow?.let { root ->
-        collect(root, elements, windowIndex = 0, windowPackage = root.packageName?.toString())
+        collect(root, elements, windowIndex = 0, windowPackage = root.packageName?.toString(), ime = false)
       }
       return elements
     }
     windows.forEachIndexed { index, window ->
       val root = window.root ?: return@forEachIndexed
-      collect(root, elements, index, root.packageName?.toString())
+      collect(root, elements, index, root.packageName?.toString(), window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD)
     }
     return elements
   }
 
+  /**
+   * [ime] marks nodes of the soft keyboard's window. A keyboard publishes every key as a labelled,
+   * clickable node — a hundred-odd lines that answer no question about the app — so the host
+   * collapses them to one "keyboard is open" line instead of guessing from package names.
+   */
   private fun collect(
     root: AccessibilityNodeInfo,
     into: JSONArray,
     windowIndex: Int,
     windowPackage: String?,
+    ime: Boolean,
   ) {
     walk(root) { node ->
       if (describes(node)) {
-        into.put(describe(node).put("window", windowIndex).put("package", windowPackage ?: JSONObject.NULL))
+        val described = describe(node).put("window", windowIndex).put("package", windowPackage ?: JSONObject.NULL)
+        into.put(if (ime) described.put("ime", true) else described)
       }
     }
   }
@@ -369,6 +400,10 @@ class DeviceAgent {
       .put("focused", node.isFocused)
       .put("editable", node.isEditable)
       .put("scrollable", node.isScrollable)
+      // Tab, toggle and checkbox state: without these a caller cannot tell which tab is current or
+      // whether a switch is on, and has to fall back to pixels for a fact the node already knows.
+      .put("selected", node.isSelected)
+      .apply { if (node.isCheckable) put("checked", @Suppress("DEPRECATION") node.isChecked) }
       // The whole reason this agent exists: the host-side XML dump cannot tell you this.
       .put("visible", node.isVisibleToUser)
       .put("x", bounds.left)
@@ -394,7 +429,21 @@ class DeviceAgent {
    * open would otherwise resolve to the key — and visible-first ranking would *prefer* it over the
    * app's own occluded content. Acting on the keyboard is never what a selector means.
    */
-  private fun find(request: JSONObject): AccessibilityNodeInfo? {
+  private fun find(request: JSONObject): AccessibilityNodeInfo? = findRanked(request).let { matches ->
+    matches.getOrNull(request.optInt("index", 0).coerceAtLeast(0))
+  }
+
+  /**
+   * Every match, visible ones first and screen order within each group.
+   *
+   * `index` in a request picks from this list, so "the third search result" is expressible without
+   * the result's generated test tag. The count travels back in action results: a selector that
+   * matched six nodes and acted on one is a different fact from one that matched exactly one.
+   */
+  private fun findRanked(request: JSONObject): List<AccessibilityNodeInfo> =
+    findAll(request).sortedBy { if (it.isVisibleToUser) 0 else 1 }
+
+  private fun findAll(request: JSONObject): List<AccessibilityNodeInfo> {
     val id = request.optString("id").takeIf { it.isNotEmpty() }
     val idPrefix = request.optString("idPrefix").takeIf { it.isNotEmpty() }
     val text = request.optString("text").takeIf { it.isNotEmpty() }
@@ -427,7 +476,7 @@ class DeviceAgent {
         if (hit) matches += node
       }
     }
-    return matches.firstOrNull { it.isVisibleToUser } ?: matches.firstOrNull()
+    return matches
   }
 
   // ---------------------------------------------------------------------------
@@ -454,7 +503,13 @@ class DeviceAgent {
    * to change nothing on screen.
    */
   private fun act(request: JSONObject, device: UiDevice, action: Int): JSONObject {
-    val node = find(request) ?: return noMatch()
+    val ranked = findRanked(request)
+    val node = ranked.getOrNull(request.optInt("index", 0).coerceAtLeast(0))
+      ?: return noMatch().put("matchCount", ranked.size)
+    return actOn(node, request, device, action).put("matchCount", ranked.size)
+  }
+
+  private fun actOn(node: AccessibilityNodeInfo, request: JSONObject, device: UiDevice, action: Int): JSONObject {
 
     var target: AccessibilityNodeInfo? = node
     while (target != null && !target.isClickable) {
@@ -1076,7 +1131,7 @@ class DeviceAgent {
     const val BACKLOG = 4
 
     /** Bumped whenever an op's request or response shape changes, so the host can refuse a stale pair. */
-    const val PROTOCOL = 6
+    const val PROTOCOL = 7
 
     const val OP_PING = "ping"
     const val OP_CAPABILITIES = "capabilities"

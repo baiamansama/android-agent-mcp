@@ -82,7 +82,10 @@ interface UiAutomatorXmlNode {
 	hint?: string;
 	focused?: string;
 	checkable?: string;
+	checked?: string;
 	clickable?: string;
+	enabled?: string;
+	selected?: string;
 	"content-desc"?: string;
 	"resource-id"?: string;
 }
@@ -478,6 +481,16 @@ export class AndroidRobot implements Robot {
 				element.focused = true;
 			}
 
+			if (node.enabled === "false") {
+				element.enabled = false;
+			}
+			if (node.selected === "true") {
+				element.selected = true;
+			}
+			if (node.checkable === "true") {
+				element.checked = node.checked === "true";
+			}
+
 			const resourceId = node["resource-id"];
 			if (resourceId !== null && resourceId !== "") {
 				element.identifier = resourceId;
@@ -854,6 +867,9 @@ export class AndroidRobot implements Robot {
 		const parser = new xml.XMLParser({
 			ignoreAttributes: false,
 			attributeNamePrefix: "",
+			// uiautomator escapes emoji and other astral characters as numeric references; without
+			// this an avatar reads as `&#128578;` instead of 🙂.
+			htmlEntities: true,
 		});
 
 		const parsed = parser.parse(dump) as UiAutomatorXml;

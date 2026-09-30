@@ -10,7 +10,7 @@ the wire.
         ▼
    ┌─────────────────────────────────────────────┐
    │ host server  (TypeScript, src/)             │
-   │  · 38 tools                                 │
+   │  · 31 tools                                 │
    │  · device resolution + per-device locking   │
    │  · picks a transport per call               │
    └───────────┬─────────────────────┬───────────┘
@@ -161,15 +161,31 @@ the phone's agent became unreachable, and the session degraded to adb reporting 
 
 ## 4. Verify, don't trust
 
-Two platform behaviours make optimistic automation quietly wrong, and both were measured rather
-than assumed.
+Platform behaviours that make optimistic automation quietly wrong, each measured rather than assumed.
 
-**Compose publishes `ACTION_CLICK` it does not honour.** On Android 16 / Compose UI 1.12.0-beta01,
+**The accessibility cache goes stale.** A UiAutomation connection caches every node it fetches and
+drops an entry only when the app reports a change — and Compose does not report every change to a
+UiAutomation client. On API 37 emulators (2026-09-30), after BACK closed a bottom sheet the tree
+kept the sheet `visible`, at its old bounds, for minutes and through a scroll that visibly moved
+every row; only a window change (HOME and back) refreshed it. Everything downstream inherited the
+lie: `waitStable` hashed a frozen tree and answered "stable" in 250ms, and a click whose effect had
+landed (the pixels showed the new tab) looked like a no-op, so the gesture fallback below fired a
+**second, physical tap** — harmless on a tab, a double action on a toggle. Since protocol 7 every
+read clears the cache first. It costs a re-fetch — a Pixel 10 emulator dump went from ~11ms
+(cached, wrong) to ~70ms (fresh) — and removes the whole class.
+
+**Compose publishes `ACTION_CLICK` it does not honour — or appeared to.** On Android 16 / Compose UI 1.12.0-beta01,
 every Compose clickable in the app under test accepted `ACTION_CLICK` and returned `true` while the
 handler's effect never landed — dock, icon buttons, M3 buttons, plain cards alike. Invoking the
 node's Compose `OnClick` semantics lambda directly, in-process on the main thread, behaved
 identically, which places the loss below the accessibility layer rather than inside it. Only real
 `MotionEvent`s worked.
+
+With fresh reads the picture changed: on the API 37 emulator every dock `ACTION_CLICK` was confirmed
+by the tree as a node click (6/6, no gesture fallback), where the cached tree had sent every one to
+the fallback. The Android 16 measurement above predates the cache fix and has not been repeated on
+that hardware, so the fallback stays — and the host now reports `method` and `changed` on every
+tap, so a no-op is visible instead of being narrated as success.
 
 So a click is followed by a structural re-read, and if the tree is untouched the node's centre is
 tapped as a real gesture instead. The response reports `method: "node" | "gesture"` so a caller is
@@ -233,6 +249,19 @@ equivalent JSON, mostly by dropping a `coordinates` object per element — on a 
 alone is about two thirds of the payload. `filter: "interactive"` narrows to what can be acted on.
 `diff: true` returns only the lines added and removed since the last read, falling back to the full
 tree when the diff would be larger.
+
+Since 0.3.0 the lines are shaped for a reader rather than mirrored from the tree: framework wrappers
+are dropped, same-rectangle nodes fuse, a clickable container absorbs the words inside it (so an
+icon button reads `"Save to a collection" … clickable` instead of an anonymous box plus a stray
+label), bidi isolates are stripped, and an open soft keyboard — a hundred-odd key nodes — becomes one
+line. On the Pixel 10 emulator's dictionary screen with the keyboard up that is 183 raw nodes in 21
+lines, ~520 tokens where the previous format spent ~2,900. Presentation only: selectors still
+resolve against the raw tree.
+
+The same economy applies to the tool catalog and to failures. 0.3.0 folds seven tools into
+parameters of surviving ones (31 tools, ~8.7k schema tokens, from 38 and ~9.8k), sends a short MCP
+`instructions` block naming the tools to reach for first, returns a passing assertion as one line,
+and collapses generated tag families in error messages to the `idPrefix` a caller should use.
 
 Screenshots are the fallback, not the default: the element list answers "what is on screen" faster
 and cheaper, and its `#tags` feed the element tools directly. Reach for pixels only when layout,

@@ -19,11 +19,11 @@ Legend: ✅ have · ⬆ have, structurally stronger · ❌ gap · — not applic
 
 ## Action coverage
 
-| Capability | iOS `control` | XcodeBuildMCP | android-agent-mcp (2026-08-05) |
+| Capability | iOS `control` | XcodeBuildMCP | android-agent-mcp (0.3.0, 2026-09-30) |
 |---|---|---|---|
 | Tap at coordinates | ✅ `tap` | ✅ `tap` | ✅ `mobile_click_on_screen_at_coordinates` |
-| Tap by element identity | ❌ (coordinates only) | ✅ elementRef taps | ⬆ `mobile_tap_on_element` — test tag / lenient text, ACTION_CLICK on the node itself, verified change + gesture fallback, keyboard-occlusion recovery |
-| Double tap | ❌ | ✅ | ⬆ `mobile_double_tap_on_screen` — agent-injected inside the platform's double-tap window (two adb taps land too far apart to register) |
+| Tap by element identity | ❌ (coordinates only) | ✅ elementRef taps | ⬆ `mobile_tap_on_element` — test tag / tag prefix / lenient text + `index`, ACTION_CLICK on the node itself, verified change + gesture fallback, keyboard-occlusion recovery; the result reports whether the screen changed and how many elements matched |
+| Double tap | ❌ | ✅ | ⬆ `mobile_click_on_screen_at_coordinates` `count:2` — agent-injected inside the platform's double-tap window (two adb taps land too far apart to register) |
 | Long press | ❌ (via `touch_path` hold) | ✅ `long_press` | ✅ coords; ⬆ by element (`mobile_tap_on_element` `longPress`) |
 | Swipe | ✅ `swipe` | ✅ `swipe` | ✅ directional (finger-direction) + from-coordinate |
 | Arbitrary single-finger path / drag | ✅ `touch_path` | ✅ `touch`/`gesture` | ✅ `mobile_gesture` (agent MotionEvent injection, timed points, optional initial hold for drag-and-drop) |
@@ -39,12 +39,12 @@ Legend: ✅ have · ⬆ have, structurally stronger · ❌ gap · — not applic
 | Capability | iOS `control` | XcodeBuildMCP | android-agent-mcp |
 |---|---|---|---|
 | Screenshot | ✅ PNG | ✅ (downscale option) | ⬆ scaled + JPEG-encoded **on the device** (~263ms / ~40KB measured on the API 37 emulator); explicit `imageScale` note; legibility floor; host needs no image tooling on the agent path |
-| Semantic UI tree | ❌ none | ✅ `snapshot_ui` | ⬆ `mobile_list_elements_on_screen` / `mobile_find_elements` — live in-process tree (12ms fresh / ~1ms cached on the emulator), per-node visibility surfaced as `hidden` in the compact format, `diff:true` returns only the change since the last list (smallest-wins fallback), window + foreground truth on every result, colocated-node merge, Arabic/bidi/diacritic-folded matching |
+| Semantic UI tree | ❌ none | ✅ `snapshot_ui` | ⬆ `mobile_list_elements_on_screen` (optionally narrowed by selector, numbered for `index`) — live in-process tree read fresh from the app every time (~70ms on the Pixel 10 emulator; cache-cleared since 0.3.0), clickable containers show their words, keyboard collapsed to one line, disabled/selected/checked flags, per-node visibility surfaced as `hidden` in the compact format, `diff:true` returns only the change since the last list (smallest-wins fallback), window + foreground truth on every result, colocated-node merge, Arabic/bidi/diacritic-folded matching |
 | Element handles stable across calls | — | ✅ elementRef (per snapshot) | ⬆ Compose test tags — stable across sessions, builds, locales; not per-snapshot |
 | Window/dialog stack | ❌ | ❌ | ⬆ `mobile_list_windows` (app + IME windows, topmost first, owner package) |
-| Screen recording | ❌ | ✅ `record_sim_video` | ✅ start/stop, background; stop SIGINTs the device-side recorder, waits for it to exit (moov atom finalized), then pulls the .mp4 — verified 700KB playable file 2026-08-28 |
+| Screen recording | ❌ | ✅ `record_sim_video` | ✅ `mobile_screen_recording` start/stop, background; stop SIGINTs the device-side recorder, waits for it to exit (moov atom finalized), then pulls the .mp4 — verified 700KB playable file 2026-08-28 |
 | Logs (app/system) | ❌ | ✅ sim log capture | ✅ `mobile_logcat` — pid-scoped, priority/tag filters, marker-based "since", crash buffer, byte-capped |
-| Crash capture | ❌ | ✅ | ✅ `mobile_list_crashes` / `mobile_get_crash` (DropBox: java crash, native crash, ANR, WTF) |
+| Crash capture | ❌ | ✅ | ✅ `mobile_crashes` — index, or one report by tag (DropBox: java crash, native crash, ANR, WTF) |
 | ANR capture | ❌ | — | ✅ via DropBox `data_app_anr` entries |
 | Performance evidence | ❌ | ✅ Instruments-oriented | ✅ `mobile_performance`: Perfetto system trace, Simpleperf CPU samples, gfxinfo frame stats, meminfo and HPROF artifacts; capability/profileable preflight |
 | Assertions | ❌ | ❌ | ⬆ `mobile_assert` — exists/visible/textEquals/minCount/foregroundPackage with evidence; `visible` checks the node's real isVisibleToUser (agent transport), honestly reported unknown over adb |

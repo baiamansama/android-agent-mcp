@@ -83,21 +83,21 @@ Both arrangements are supported — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 
 ---
 
-## The 38 tools
+## The 31 tools
 
-Full reference with every parameter: **[docs/TOOLS.md](docs/TOOLS.md)**.
+Full reference with every parameter: **[docs/TOOLS.md](docs/TOOLS.md)**. The server also sends
+short MCP instructions — which tool to reach for first — so a client can seed the model once.
 
 **Reading the screen**
-`mobile_list_elements_on_screen` · `mobile_find_elements` · `mobile_list_windows` ·
-`mobile_take_screenshot` · `mobile_save_screenshot` · `mobile_get_screen_size`
+`mobile_list_elements_on_screen` (compact lines, or the numbered matches of a selector) ·
+`mobile_list_windows` · `mobile_take_screenshot` (inline, or full resolution to a file)
 
-**Acting by identity** (test tag, id prefix, or folded text — never a coordinate)
+**Acting by identity** (test tag, id prefix, or folded text, plus `index` — never a coordinate)
 `mobile_tap_on_element` · `mobile_set_text` · `mobile_scroll_into_view` · `mobile_type_keys`
 
 **Acting by coordinate**
-`mobile_click_on_screen_at_coordinates` · `mobile_double_tap_on_screen` ·
-`mobile_long_press_on_screen_at_coordinates` · `mobile_swipe_on_screen` · `mobile_gesture` ·
-`mobile_pinch` · `mobile_press_button` · `mobile_open_url`
+`mobile_click_on_screen_at_coordinates` (tap, double-tap, long-press) · `mobile_swipe_on_screen` ·
+`mobile_gesture` · `mobile_pinch` · `mobile_press_button` · `mobile_open_url`
 
 **Waiting and asserting** (assertions poll until true or deadline — an assert *is* a wait)
 `mobile_wait_for_stable` · `mobile_assert` · `mobile_run_steps`
@@ -112,9 +112,12 @@ mode, wifi, data, orientation) · `mobile_emulator` (bandwidth/latency shaping, 
 fold/posture)
 
 **Diagnostics**
-`mobile_logcat` · `mobile_list_crashes` · `mobile_get_crash` · `mobile_start_screen_recording` ·
-`mobile_stop_screen_recording` · `mobile_watch` (live scrcpy mirror) · `mobile_performance`
-(Perfetto, Simpleperf, frame, memory and heap evidence) · `mobile_agent_status`
+`mobile_logcat` · `mobile_crashes` · `mobile_screen_recording` · `mobile_watch` (live scrcpy
+mirror) · `mobile_performance` (Perfetto, Simpleperf, frame, memory and heap evidence) ·
+`mobile_agent_status`
+
+Failures — a missed selector, a failed assertion, a journey that stopped — come back as `isError`
+results, so a client never mistakes one for data.
 
 ### One call per journey
 

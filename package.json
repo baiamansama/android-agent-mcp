@@ -1,6 +1,6 @@
 {
   "name": "android-agent-mcp",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Android device automation MCP server. Reads the live accessibility tree in-process, acts on nodes instead of coordinates, verifies every action, and enters Unicode text — over adb, or ~10x faster through an on-device agent.",
   "keywords": [
     "mcp",
@@ -25,6 +25,7 @@
   },
   "files": [
     "lib",
+    "driver",
     "NOTICE"
   ],
   "scripts": {
@@ -35,10 +36,11 @@
     "fixlint": "eslint . --fix",
     "test": "c8 playwright test",
     "agent:build": "cd agent && ./gradlew :driver:assembleDebug :driver:assembleDebugAndroidTest",
-    "agent:install": "node scripts/install-agent.mjs"
+    "agent:install": "node scripts/install-agent.mjs",
+    "agent:bundle": "node -e \"const fs=require('fs');fs.mkdirSync('driver',{recursive:true});fs.copyFileSync('agent/driver/build/outputs/apk/debug/driver-debug.apk','driver/driver-debug.apk');fs.copyFileSync('agent/driver/build/outputs/apk/androidTest/debug/driver-debug-androidTest.apk','driver/driver-debug-androidTest.apk')\""
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/server": "2.2.0",
     "fast-xml-parser": "5.11.1",
     "zod": "4.5.4"
   },

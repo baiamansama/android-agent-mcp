@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.3.0 — 2026-09-30
+
+Measured on Pixel 10 and Pixel Tablet emulators (API 37.1); numbers in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Correctness
+
+- **Fresh reads (agent protocol 7).** The agent clears the accessibility node cache before every
+  read. Compose does not report every change to a UiAutomation client, and the cached tree kept a
+  closed bottom sheet `visible` for minutes, made `waitStable` report a frozen screen as stable,
+  and turned working `ACTION_CLICK`s into apparent no-ops that triggered a second, physical tap.
+- **Honest taps.** `mobile_tap_on_element` and `mobile_run_steps` report how a tap landed
+  (`screen changed`, a real-tap follow-up, or **the screen did not change**) and how many elements
+  matched. Previously every agent tap read "directly (agent, no coordinates)".
+- **Failures are `isError`.** Missed selectors, failed assertions and journeys that stop early are
+  flagged as errors instead of arriving as ordinary text.
+- **`index` on every selector** — pick the Nth match. Host and agent now rank matches the same way
+  (visible first, then tree order), so a numbered listing, the adb path and the agent agree.
+- adb path: numeric XML entities are decoded (`&#128578;` → 🙂).
+
+### Tokens
+
+- Compact lines are shaped for a reader: framework wrappers dropped, same-rectangle nodes fused,
+  clickable containers carry the words inside them, bidi isolates stripped, and an open soft
+  keyboard collapses to one line. Dictionary screen with the keyboard up: ~2,900 → ~520 tokens.
+- New state flags: `disabled`, `selected`, `checked` / `unchecked` (agent and adb).
+- A passing `mobile_assert` is one line; missed-selector errors collapse generated tag families to
+  `prefix.* (n)`.
+- The server sends MCP `instructions`: which tools to reach for first and what results mean.
+- `mobile_run_steps` `snapshot: "interactive"` returns only actionable lines.
+
+### Tools: 38 → 31 (breaking)
+
+| Removed | Use instead |
+|---|---|
+| `mobile_find_elements` | `mobile_list_elements_on_screen` with `id` / `idPrefix` / `text` (numbered for `index`) |
+| `mobile_get_screen_size` | `mobile_device_state` (reports pixels, dp and size classes) |
+| `mobile_save_screenshot` | `mobile_take_screenshot` with `saveTo` |
+| `mobile_double_tap_on_screen`, `mobile_long_press_on_screen_at_coordinates` | `mobile_click_on_screen_at_coordinates` with `count: 2` or `longPress` |
+| `mobile_start_screen_recording`, `mobile_stop_screen_recording` | `mobile_screen_recording` with `action` |
+| `mobile_list_crashes`, `mobile_get_crash` | `mobile_crashes` (no `id` lists, `id` fetches) |
+
+### Setup
+
+- **Automatic driver install** (standalone mode): when the driver is missing or speaks another
+  protocol, the server installs it from `ANDROID_AGENT_DRIVER_DIR`, a packaged `driver/` directory
+  (`npm run agent:bundle`), or this repo's Gradle output. `ANDROID_AGENT_AUTO_INSTALL=0` turns it
+  off; `mobile_agent_status` reports what happened.
+- `@modelcontextprotocol/server` 2.0.0 → 2.2.0.
+
 ## Unreleased
 
 First public release, forked from [mobile-mcp](https://github.com/mobile-next/mobile-mcp) 0.0.62.

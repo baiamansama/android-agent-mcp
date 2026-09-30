@@ -7,7 +7,7 @@ import { ChildProcess, spawn, execFileSync } from "node:child_process";
 
 import { error, trace } from "./logger";
 import { AndroidDeviceManager, WIDTH_CLASS_TARGET_DP, WidthClass, WindowMetrics, WindowSizeRequest, getAdbPath } from "./android";
-import { AgentAndroidRobot, ElementSelector, computeCompactDiff, describeSelector, formatCompactElementLines } from "./automation";
+import { AgentAndroidRobot, ElementSelector, TapResult, compactForDisplay, isInteractive, computeCompactDiff, describeSelector, formatCompactElementLines } from "./automation";
 import { AGENT_IDENTITY, agentStartHint } from "./agent";
 import { ActionableError } from "./robot";
 import { PNG } from "./png";
@@ -30,6 +30,35 @@ interface DeviceSummary {
 interface DevicesResponse {
 	devices: DeviceSummary[];
 }
+
+/**
+ * A tool outcome that is a failure but still carries the full evidence as its message.
+ *
+ * Thrown by tools whose failure output is itself the useful payload — a failed assertion, a journey
+ * that stopped — so the text reaches the caller verbatim with `isError: true`.
+ */
+class ToolFailure extends Error {}
+
+/** One human sentence for what a tap did; the method and change facts are the point. */
+export const describeTap = (result: TapResult, verb = "Tapped"): string => {
+	const name = result.element.identifier || result.element.text || result.element.label || "element";
+	let how: string;
+	if (result.method === "coordinates") {
+		const x = Math.round(result.element.rect.x + result.element.rect.width / 2);
+		const y = Math.round(result.element.rect.y + result.element.rect.height / 2);
+		how = `at ${x},${y} over adb (effect not verified)`;
+	} else if (result.method === "node") {
+		how = "(screen changed)";
+	} else if (result.changed === false) {
+		how = "but the screen did not change — the node action and a real tap both had no visible effect (disabled, dead, or a no-op control)";
+	} else {
+		how = "(node action had no visible effect, so a real tap followed; screen changed)";
+	}
+	const ambiguity = result.matchCount > 1
+		? `. ${result.matchCount} elements matched; pass index to pick another`
+		: "";
+	return `${verb} ${name} ${how}${ambiguity}`;
+};
 
 interface ActiveRecording {
 	process: ChildProcess;
@@ -65,6 +94,22 @@ export const parseWindowSize = (value: string, current: WindowMetrics): WindowSi
 	}
 	return { widthDp, heightDp: current.heightDp };
 };
+
+/**
+ * The operating manual a client places in the model's context once per session.
+ *
+ * Every line here replaces a round trip a model otherwise spends discovering it: which tool to
+ * reach for first, that journeys batch, that selectors beat coordinates, and what the result
+ * fields mean. Kept short on purpose — it is paid for in every session that loads the server.
+ */
+export const SERVER_INSTRUCTIONS = [
+	"Android device automation. The device is resolved automatically when exactly one is connected.",
+	"Read the screen with mobile_list_elements_on_screen (compact lines: #tag \"text\" (label) @x,y wxh + flags); take a screenshot only when pixels are the question.",
+	"Act by selector, not coordinates: mobile_tap_on_element / mobile_set_text with id (test tag), idPrefix (a tag family) or text, plus index to pick among several matches.",
+	"Batch a journey into one mobile_run_steps call (launch, taps, setText, asserts, snapshot) instead of one tool call per step; it settles between steps and stops at the first failure.",
+	"Verify with mobile_assert, which waits for its condition instead of racing it. Results with isError are failures, not retry hints.",
+	"A tap reports how it landed: 'screen did not change' means the control did nothing. transport:adb means the on-device agent is not running and results are slower and coarser; mobile_agent_status says why.",
+].join("\n");
 
 export const getAgentVersion = (): string => {
 	const json = require("../package.json");
@@ -124,7 +169,7 @@ export const createMcpServer = (): McpServer => {
 	const server = new McpServer({
 		name: "mobile-mcp",
 		version: getAgentVersion(),
-	});
+	}, { instructions: SERVER_INSTRUCTIONS });
 
 
 	type ZodSchemaShape = Record<string, z.ZodType>;
@@ -194,9 +239,12 @@ export const createMcpServer = (): McpServer => {
 				};
 			} catch (error: any) {
 				evictRobotIfGone(resolvedDevice ?? args?.device, error?.message ?? "");
-				if (error instanceof ActionableError) {
+				if (error instanceof ToolFailure || error instanceof ActionableError) {
+					// Flagged as an error so a client — and the model reading it — cannot mistake a
+					// missed selector or a failed assertion for a result.
 					return {
-						content: [{ type: "text", text: `${error.message}. Please fix the issue and try again.` }],
+						content: [{ type: "text", text: error.message }],
+						isError: true,
 					};
 				} else {
 					// a real exception
@@ -211,7 +259,7 @@ export const createMcpServer = (): McpServer => {
 	};
 
 	/** Shared device parameter: optional, resolved by [resolveDeviceId]. */
-	const deviceParam = () => z.string().optional().describe("Device id. Omit when exactly one device is connected; see mobile_list_available_devices.");
+	const deviceParam = () => z.string().optional().describe("Device serial. Omit when only one is connected.");
 
 	const activeRecordings = new Map<string, ActiveRecording>();
 	const watchers = new Map<string, ChildProcess>();
@@ -309,7 +357,7 @@ export const createMcpServer = (): McpServer => {
 	tool(
 		"mobile_launch_app",
 		"Launch App",
-		"Launch an app on mobile device. Use this to open a specific app. You can find the package name of the app by calling list_apps_on_device.",
+		"Launch an app on mobile device. Use this to open a specific app. Find the package name with mobile_list_apps.",
 		{
 			device: deviceParam(),
 			packageName: z.string().describe("The package name of the app to launch"),
@@ -383,93 +431,64 @@ export const createMcpServer = (): McpServer => {
 	);
 
 	tool(
-		"mobile_get_screen_size",
-		"Get Screen Size",
-		"Screen geometry in pixels and in dp, with the androidx window size class the window falls in. The dp width is what adaptive layouts branch on \u2014 pixels alone cannot tell a 1280dp tablet from a 900dp one, and both report as \"a tablet\". Coordinates for every other tool in this server are in pixels.",
-		{
-			device: deviceParam(),
-		},
-		{ readOnlyHint: true },
-		async ({ device }) => {
-			const robot = getRobot(device);
-			const window = await robot.getWindowMetrics();
-			return `Screen size is ${window.widthPx}x${window.heightPx} pixels `
-				+ `(${window.widthDp}x${window.heightDp} dp at ${window.density}dpi, `
-				+ `sw${window.smallestWidthDp}dp) \u2014 width class ${window.widthClass}, `
-				+ `height class ${window.heightClass}`;
-		}
-	);
-
-	tool(
 		"mobile_click_on_screen_at_coordinates",
-		"Click Screen",
-		"Click on the screen at given x,y coordinates. If clicking on an element, use the list_elements_on_screen tool to find the coordinates.",
+		"Tap Screen Coordinates",
+		"Tap at device-pixel coordinates — the fallback when no selector reaches the target (prefer mobile_tap_on_element). count:2 double-taps inside the platform's double-tap window (agent transport; over adb two taps may register as singles). longPress holds for duration ms.",
 		{
 			device: deviceParam(),
-			x: z.coerce.number().describe("The x coordinate to click on the screen, in pixels"),
-			y: z.coerce.number().describe("The y coordinate to click on the screen, in pixels"),
+			x: z.coerce.number().describe("X in device pixels"),
+			y: z.coerce.number().describe("Y in device pixels"),
+			count: z.coerce.number().int().min(1).max(2).optional().describe("2 for a double-tap. Default 1."),
+			longPress: z.boolean().optional().describe("Press and hold instead of tapping."),
+			duration: z.coerce.number().min(1).max(10000).optional().describe("Long-press hold in ms. Default 500."),
 		},
 		{ destructiveHint: true },
-		async ({ device, x, y }) => {
+		async ({ device, x, y, count, longPress, duration }) => {
 			const robot = getRobot(device);
+			if (longPress) {
+				const pressDuration = duration ?? 500;
+				await robot.longPress(x, y, pressDuration);
+				return `Long-pressed ${x},${y} for ${pressDuration}ms`;
+			}
+			if (count === 2) {
+				await robot.doubleTap(x, y);
+				return `Double-tapped ${x},${y}`;
+			}
 			await robot.tap(x, y);
-			return `Clicked on screen at coordinates: ${x}, ${y}`;
-		}
-	);
-
-	tool(
-		"mobile_double_tap_on_screen",
-		"Double Tap Screen",
-		"Double-tap on the screen at given x,y coordinates. Through the in-process agent both taps are injected inside the platform's double-tap window; over adb the two taps land too far apart and may register as two singles.",
-		{
-			device: deviceParam(),
-			x: z.coerce.number().describe("The x coordinate to double-tap, in pixels"),
-			y: z.coerce.number().describe("The y coordinate to double-tap, in pixels"),
-		},
-		{ destructiveHint: true },
-		async ({ device, x, y }) => {
-			const robot = getRobot(device);
-			await robot.doubleTap(x, y);
-			return `Double-tapped on screen at coordinates: ${x}, ${y}`;
-		}
-	);
-
-	tool(
-		"mobile_long_press_on_screen_at_coordinates",
-		"Long Press Screen",
-		"Long press on the screen at given x,y coordinates. If long pressing on an element, use the list_elements_on_screen tool to find the coordinates.",
-		{
-			device: deviceParam(),
-			x: z.coerce.number().describe("The x coordinate to long press on the screen, in pixels"),
-			y: z.coerce.number().describe("The y coordinate to long press on the screen, in pixels"),
-			duration: z.coerce.number().min(1).max(10000).optional().describe("Duration of the long press in milliseconds. Defaults to 500ms."),
-		},
-		{ destructiveHint: true },
-		async ({ device, x, y, duration }) => {
-			const robot = getRobot(device);
-			const pressDuration = duration ?? 500;
-			await robot.longPress(x, y, pressDuration);
-			return `Long pressed on screen at coordinates: ${x}, ${y} for ${pressDuration}ms`;
+			return `Tapped ${x},${y}`;
 		}
 	);
 
 	tool(
 		"mobile_list_elements_on_screen",
 		"List Screen Elements",
-		"The screen as a compact semantic tree: one element per line — `#test-tag \"text\" (label) Type @x,y wxh clickable scrollable hidden`. Prefer this over screenshots; it is faster and cheaper, and the #tags feed mobile_tap_on_element directly. `hidden` marks nodes present but not visible to the user (agent transport only) — never plan a tap on one. The header reports `transport` (agent = live in-process tree; adb = XML dump without visibility) and `foreground` — if foreground is not the app you expect, the tree belongs to something else. diff:true returns only lines added (+) and removed (-) since the previous list call, which is much cheaper after a small change. Do not cache this result.",
+		"The screen as compact lines, one per thing a person would point at: `#test-tag \"text\" (label) Type @x,y wxh` plus flags clickable, focused, scrollable, disabled, selected, checked/unchecked, hidden. Prefer this over screenshots; #tags feed the selector tools directly. A clickable container shows the words inside it; `hidden` is present but not visible (agent transport only) — never plan a tap on one. The header's `foreground` names the app the tree belongs to. With id/idPrefix/text it returns only the matches, numbered by the index the action tools accept. diff:true returns only lines added (+) and removed (-) since the previous list. Do not cache this result.",
 		{
 			device: deviceParam(),
+			id: z.string().optional().describe("Only elements with this exact test tag / resource-id"),
+			idPrefix: z.string().optional().describe("Only elements whose tag starts with this, e.g. shell.dock."),
+			text: z.string().optional().describe("Only elements whose text or label contains this (diacritics and bidi marks folded)"),
 			filter: z.enum(["all", "interactive"]).optional().describe("interactive returns only clickable/focused elements and named fields — the actionable subset. Default all."),
 			verbose: z.boolean().optional().describe("Return the legacy JSON element objects instead of compact lines. Costs roughly 3x the tokens."),
 			diff: z.boolean().optional().describe("Return only the change against the previous list call: `+` added lines, `-` removed lines. Falls back to the full tree when there is no baseline."),
 		},
 		{ readOnlyHint: true },
-		async ({ device, filter, verbose, diff }) => {
+		async ({ device, id, idPrefix, text, filter, verbose, diff }) => {
 			const robot = getRobot(device);
-			let elements = await robot.getElementsOnScreen();
-			const total = elements.length;
+			const raw = await robot.getElementsOnScreen();
+			const total = raw.length;
+
+			if (id || idPrefix || text) {
+				const selector = selectorFrom(id, idPrefix, text);
+				const matches = await robot.findElements(selector);
+				const header = await robot.envelope({ query: describeSelector(selector), count: matches.length, total });
+				const numbered = formatCompactElementLines(matches).map((line, index) => `[${index}] ${line}`);
+				return `${JSON.stringify(header)}\n${numbered.join("\n") || "(no matches)"}`;
+			}
+
+			let elements = verbose ? raw : compactForDisplay(raw);
 			if (filter === "interactive") {
-				elements = elements.filter(e => e.clickable || e.focused || e.identifier);
+				elements = elements.filter(isInteractive);
 			}
 
 			if (verbose) {
@@ -626,28 +645,6 @@ export const createMcpServer = (): McpServer => {
 		}
 	);
 
-	tool(
-		"mobile_save_screenshot",
-		"Save Screenshot",
-		"Save a full-resolution screenshot of the mobile device to a file",
-		{
-			device: deviceParam(),
-			saveTo: z.string().describe("The path to save the screenshot to. Filename must end with .png, .jpg, or .jpeg"),
-		},
-		{ destructiveHint: true },
-		async ({ device, saveTo }) => {
-			validateFileExtension(saveTo, ALLOWED_SCREENSHOT_EXTENSIONS, "save_screenshot");
-			validateOutputPath(saveTo);
-
-			const robot = getRobot(device);
-
-			// Native resolution, PNG: a saved artifact is for close inspection, not token economy.
-			const shot = await robot.screenshotWithSize({ format: "png" });
-			fs.writeFileSync(saveTo, shot.buffer);
-			return `Screenshot saved to: ${saveTo} (${shot.width}x${shot.height})`;
-		}
-	);
-
 	server.registerTool(
 		"mobile_take_screenshot",
 		{
@@ -656,17 +653,29 @@ export const createMcpServer = (): McpServer => {
 			inputSchema: z.object({
 				device: deviceParam(),
 				maxWidth: z.coerce.number().min(240).max(2400).optional().describe("Longest acceptable image width in pixels. Default: device width divided by display scale, floored at 480 for legibility."),
+				saveTo: z.string().optional().describe("Instead of returning an image, save a full-resolution PNG/JPEG to this host path (.png, .jpg, .jpeg) and return the path."),
 				quality: z.coerce.number().min(30).max(100).optional().describe("JPEG quality. Default 75."),
 			}),
 			annotations: {
-				readOnlyHint: true,
+				// saveTo writes a host file; nothing on the device changes either way.
+				readOnlyHint: false,
+				destructiveHint: false,
+				openWorldHint: false,
 			},
 		},
-		async ({ device, maxWidth, quality }) => {
+		async ({ device, maxWidth, quality, saveTo }) => {
 			try {
 				const deviceId = resolveDeviceId(device);
 				return await withDeviceLock(deviceId, async () => {
 					const robot = getRobot(deviceId);
+					if (saveTo) {
+						validateFileExtension(saveTo, ALLOWED_SCREENSHOT_EXTENSIONS, "take_screenshot");
+						validateOutputPath(saveTo);
+						// Native resolution, PNG: a saved artifact is for close inspection, not token economy.
+						const saved = await robot.screenshotWithSize({ format: "png" });
+						fs.writeFileSync(saveTo, saved.buffer);
+						return { content: [{ type: "text" as const, text: `Screenshot saved to: ${saveTo} (${saved.width}x${saved.height})` }] };
+					}
 					const screenSize = await robot.getScreenSize();
 
 					// Downscale target: dp width by default (device px / scale), floored for legibility.
@@ -740,188 +749,174 @@ export const createMcpServer = (): McpServer => {
 		}
 	);
 
-	tool(
-		"mobile_start_screen_recording",
-		"Start Screen Recording",
-		"Start recording the screen of a mobile device. The recording runs in the background until stopped with mobile_stop_screen_recording. Returns the path where the recording will be saved.",
-		{
-			device: deviceParam(),
-			output: z.string().optional().describe("The file path to save the recording to. Filename must end with .mp4. If not provided, a temporary path will be used."),
-			timeLimit: z.coerce.number().optional().describe("Maximum recording duration in seconds. The recording will stop automatically after this time."),
-		},
-		{ destructiveHint: true },
-		async ({ device, output, timeLimit }) => {
-			if (output) {
-				validateFileExtension(output, ALLOWED_RECORDING_EXTENSIONS, "start_screen_recording");
-				validateOutputPath(output);
-			}
+	const startRecording = async (device: string, output?: string, timeLimit?: number): Promise<string> => {
+		if (output) {
+			validateFileExtension(output, ALLOWED_RECORDING_EXTENSIONS, "start_screen_recording");
+			validateOutputPath(output);
+		}
 
-			getRobot(device);
+		getRobot(device);
 
-			if (activeRecordings.has(device)) {
-				throw new ActionableError(`Device "${device}" is already being recorded. Stop the current recording first with mobile_stop_screen_recording.`);
-			}
+		if (activeRecordings.has(device)) {
+			throw new ActionableError(`Device "${device}" is already being recorded. Stop it first with mobile_screen_recording action:stop.`);
+		}
 
-			const outputPath = output || path.join(os.tmpdir(), `screen-recording-${Date.now()}.mp4`);
+		const outputPath = output || path.join(os.tmpdir(), `screen-recording-${Date.now()}.mp4`);
 
-			// adb records to device storage; the stop tool pulls the file to the host.
-			const remotePath = `/sdcard/android-agent-recording-${Date.now()}.mp4`;
-			const args = ["-s", device, "shell", "screenrecord"];
-			if (timeLimit !== undefined) {
-				args.push("--time-limit", String(timeLimit));
-			} else {
-				// screenrecord's built-in default stops at 180s. Android 14+ accepts 0 = unlimited,
-				// which is what "record until I say stop" means; on API <= 33 the value is rejected,
-				// so keep the platform default there.
-				try {
-					const sdk = Number(execFileSync(getAdbPath(), ["-s", device, "shell", "getprop", "ro.build.version.sdk"], { timeout: 5000 }).toString().trim());
-					if (sdk >= 34) {
-						args.push("--time-limit", "0");
-					}
-				} catch {
-					// Unknown SDK: leave the default cap rather than risk an invalid flag.
+		// adb records to device storage; the stop tool pulls the file to the host.
+		const remotePath = `/sdcard/android-agent-recording-${Date.now()}.mp4`;
+		const args = ["-s", device, "shell", "screenrecord"];
+		if (timeLimit !== undefined) {
+			args.push("--time-limit", String(timeLimit));
+		} else {
+			// screenrecord's built-in default stops at 180s. Android 14+ accepts 0 = unlimited,
+			// which is what "record until I say stop" means; on API <= 33 the value is rejected,
+			// so keep the platform default there.
+			try {
+				const sdk = Number(execFileSync(getAdbPath(), ["-s", device, "shell", "getprop", "ro.build.version.sdk"], { timeout: 5000 }).toString().trim());
+				if (sdk >= 34) {
+					args.push("--time-limit", "0");
 				}
+			} catch {
+				// Unknown SDK: leave the default cap rather than risk an invalid flag.
 			}
-			args.push(remotePath);
+		}
+		args.push(remotePath);
 
-			const child = spawn(getAdbPath(), args, { stdio: "ignore" });
+		const child = spawn(getAdbPath(), args, { stdio: "ignore" });
 
-			const cleanup = () => {
-				// Keep the map entry so stop can still pull a recording whose process already
-				// exited (its own time limit, or screenrecord's 180s default).
-			};
+		const cleanup = () => {
+			// Keep the map entry so stop can still pull a recording whose process already
+			// exited (its own time limit, or screenrecord's 180s default).
+		};
 
-			child.on("error", cleanup);
-			child.on("exit", cleanup);
+		child.on("error", cleanup);
+		child.on("exit", cleanup);
 
-			activeRecordings.set(device, {
-				process: child,
-				outputPath,
-				remotePath,
-				startedAt: Date.now(),
+		activeRecordings.set(device, {
+			process: child,
+			outputPath,
+			remotePath,
+			startedAt: Date.now(),
+		});
+
+		return `Screen recording started. Output will be saved to: ${outputPath}`;
+	};
+
+	const stopRecording = async (device: string): Promise<string> => {
+		const recording = activeRecordings.get(device);
+		if (!recording) {
+			throw new ActionableError(`No active recording found for device "${device}". Start one first with mobile_screen_recording action:start.`);
+		}
+
+		const { process: child, outputPath, remotePath, startedAt } = recording;
+		activeRecordings.delete(device);
+
+		// Stop the device-side recorder directly with SIGINT so it finalizes the mp4 (writes the
+		// moov atom). Killing only the local adb client does not reliably deliver a signal to the
+		// remote process, and an unfinalized recording is unplayable.
+		try {
+			execFileSync(getAdbPath(), ["-s", device, "shell", "killall", "-INT", "screenrecord"], {
+				timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
 			});
-
-			return `Screen recording started. Output will be saved to: ${outputPath}`;
+		} catch {
+			// Recorder already exited (time limit) — the file is finalized either way.
 		}
-	);
+
+		// Finalization is only done when the device-side process is gone; pulling on a fixed
+		// sleep raced it and produced headers with no moov atom.
+		for (let attempt = 0; attempt < 20; attempt++) {
+			try {
+				const alive = execFileSync(getAdbPath(), ["-s", device, "shell", "pidof", "screenrecord"], {
+					timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
+				}).toString().trim();
+				if (!alive) {
+					break;
+				}
+			} catch {
+				break; // pidof exits non-zero when no process matches
+			}
+			await new Promise(resolve => setTimeout(resolve, 300));
+		}
+
+		if (child.exitCode === null) {
+			child.kill("SIGINT");
+			await new Promise<void>(resolve => {
+				const timeout = setTimeout(() => {
+					child.kill("SIGKILL");
+					resolve();
+				}, 10_000);
+
+				child.on("close", () => {
+					clearTimeout(timeout);
+					resolve();
+				});
+			});
+		}
+
+		const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
+
+		try {
+			execFileSync(getAdbPath(), ["-s", device, "pull", remotePath, outputPath], { timeout: 120_000 });
+		} catch (err: any) {
+			const detail = (err.stderr?.toString() || err.message || "").split("\n")[0];
+			return `Recording stopped after ~${durationSeconds}s but pulling it failed: ${detail}. The file may still be on the device at ${remotePath}.`;
+		}
+		try {
+			execFileSync(getAdbPath(), ["-s", device, "shell", "rm", remotePath], { timeout: 10_000 });
+		} catch {
+			// Leftover device file is harmless; do not fail the pull over cleanup.
+		}
+
+		if (!fs.existsSync(outputPath)) {
+			return `Recording stopped after ~${durationSeconds}s but the output file was not found at: ${outputPath}`;
+		}
+
+		const stats = fs.statSync(outputPath);
+		const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+
+		return `Recording stopped. File: ${outputPath} (${fileSizeMB} MB, ~${durationSeconds}s)`;
+	};
 
 	tool(
-		"mobile_stop_screen_recording",
-		"Stop Screen Recording",
-		"Stop an active screen recording, finalize it on the device, and pull the .mp4 to the host. Returns the file path, size, and approximate duration.",
+		"mobile_screen_recording",
+		"Screen Recording",
+		"Record the screen to an .mp4 on the host. action start begins recording in the background (unlimited length on API 34+ unless timeLimit is set); action stop finalizes it on the device, pulls it, and reports path, size and duration.",
 		{
 			device: deviceParam(),
+			action: z.enum(["start", "stop"]).describe("start or stop"),
+			output: z.string().optional().describe("For start: host path ending in .mp4. Default: a temp file."),
+			timeLimit: z.coerce.number().optional().describe("For start: stop automatically after this many seconds."),
 		},
 		{ destructiveHint: true },
-		async ({ device }) => {
-			const recording = activeRecordings.get(device);
-			if (!recording) {
-				throw new ActionableError(`No active recording found for device "${device}". Start a recording first with mobile_start_screen_recording.`);
-			}
-
-			const { process: child, outputPath, remotePath, startedAt } = recording;
-			activeRecordings.delete(device);
-
-			// Stop the device-side recorder directly with SIGINT so it finalizes the mp4 (writes the
-			// moov atom). Killing only the local adb client does not reliably deliver a signal to the
-			// remote process, and an unfinalized recording is unplayable.
-			try {
-				execFileSync(getAdbPath(), ["-s", device, "shell", "killall", "-INT", "screenrecord"], {
-					timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
-				});
-			} catch {
-				// Recorder already exited (time limit) — the file is finalized either way.
-			}
-
-			// Finalization is only done when the device-side process is gone; pulling on a fixed
-			// sleep raced it and produced headers with no moov atom.
-			for (let attempt = 0; attempt < 20; attempt++) {
-				try {
-					const alive = execFileSync(getAdbPath(), ["-s", device, "shell", "pidof", "screenrecord"], {
-						timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
-					}).toString().trim();
-					if (!alive) {
-						break;
-					}
-				} catch {
-					break; // pidof exits non-zero when no process matches
-				}
-				await new Promise(resolve => setTimeout(resolve, 300));
-			}
-
-			if (child.exitCode === null) {
-				child.kill("SIGINT");
-				await new Promise<void>(resolve => {
-					const timeout = setTimeout(() => {
-						child.kill("SIGKILL");
-						resolve();
-					}, 10_000);
-
-					child.on("close", () => {
-						clearTimeout(timeout);
-						resolve();
-					});
-				});
-			}
-
-			const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
-
-			try {
-				execFileSync(getAdbPath(), ["-s", device, "pull", remotePath, outputPath], { timeout: 120_000 });
-			} catch (err: any) {
-				const detail = (err.stderr?.toString() || err.message || "").split("\n")[0];
-				return `Recording stopped after ~${durationSeconds}s but pulling it failed: ${detail}. The file may still be on the device at ${remotePath}.`;
-			}
-			try {
-				execFileSync(getAdbPath(), ["-s", device, "shell", "rm", remotePath], { timeout: 10_000 });
-			} catch {
-				// Leftover device file is harmless; do not fail the pull over cleanup.
-			}
-
-			if (!fs.existsSync(outputPath)) {
-				return `Recording stopped after ~${durationSeconds}s but the output file was not found at: ${outputPath}`;
-			}
-
-			const stats = fs.statSync(outputPath);
-			const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
-
-			return `Recording stopped. File: ${outputPath} (${fileSizeMB} MB, ~${durationSeconds}s)`;
-		}
+		async ({ device, action, output, timeLimit }) => action === "start"
+			? await startRecording(device, output, timeLimit)
+			: await stopRecording(device)
 	);
 
 	tool(
-		"mobile_list_crashes",
-		"List Crash Reports",
-		"List crash, ANR, native-crash and WTF entries from the device's DropBox, most recent last. Each entry is `<date> <time> <tag>`; pass the tag (optionally with the timestamp) to mobile_get_crash. Fast: reads the index, not the reports.",
+		"mobile_crashes",
+		"Crash Reports",
+		"Crash, ANR, native-crash and WTF reports from the device's DropBox. Without id: the index, most recent last, one `<date> <time> <tag>` per entry (fast; reads no reports). With id: that report's content, tail-capped because the stack trace is at the end — pass a tag such as data_app_crash, optionally prefixed with an entry's date and time to pick one.",
 		{
 			device: deviceParam(),
-			limit: z.coerce.number().min(1).max(200).optional().describe("Most recent N entries. Default 20."),
+			id: z.string().optional().describe("DropBox tag, optionally prefixed with the entry's date and time. Omit to list."),
+			limit: z.coerce.number().min(1).max(200).optional().describe("Listing: most recent N entries. Default 20."),
+			maxBytes: z.coerce.number().min(1024).max(262144).optional().describe("Report: keep at most this many bytes from the end. Default 16384."),
 		},
 		{ readOnlyHint: true },
-		async ({ device, limit }) => {
+		async ({ device, id, limit, maxBytes }) => {
+			if (id === undefined) {
 			// The index listing (no --print) is ~50ms; printing every report to grep the output was
 			// tens of megabytes and seconds of work to answer "what crashed lately".
-			const out = execFileSync(getAdbPath(), ["-s", device, "shell", "dumpsys", "dropbox"], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
-			const entries = out.split("\n")
-				.map(l => l.trim())
-				.filter(l => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(l))
-				.filter(l => /crash|anr|watchdog|wtf/i.test(l));
-			const kept = entries.slice(Math.max(0, entries.length - (limit ?? 20)));
-			return JSON.stringify({ count: kept.length, totalMatching: entries.length, entries: kept });
-		}
-	);
-
-	tool(
-		"mobile_get_crash",
-		"Get Crash Report",
-		"Get the content of a crash/ANR report by its DropBox tag, e.g. data_app_crash or data_app_anr — optionally preceded by the `YYYY-mm-dd HH:MM:SS` timestamp from mobile_list_crashes to select one specific entry. Output is tail-capped; the stack trace lives at the end, which is the part that survives.",
-		{
-			device: deviceParam(),
-			id: z.string().describe("DropBox tag, optionally prefixed with the entry's date and time"),
-			maxBytes: z.coerce.number().min(1024).max(262144).optional().describe("Keep at most this many bytes from the end. Default 16384."),
-		},
-		{ readOnlyHint: true },
-		async ({ device, id, maxBytes }) => {
+				const out = execFileSync(getAdbPath(), ["-s", device, "shell", "dumpsys", "dropbox"], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+				const entries = out.split("\n")
+					.map(l => l.trim())
+					.filter(l => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(l))
+					.filter(l => /crash|anr|watchdog|wtf/i.test(l));
+				const kept = entries.slice(Math.max(0, entries.length - (limit ?? 20)));
+				return JSON.stringify({ count: kept.length, totalMatching: entries.length, entries: kept });
+			}
 			const parts = id.trim().split(/\s+/);
 			const content = execFileSync(getAdbPath(), ["-s", device, "shell", "dumpsys", "dropbox", "--print", ...parts], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
 			const cap = maxBytes ?? 16384;
@@ -929,69 +924,43 @@ export const createMcpServer = (): McpServer => {
 				return content;
 			}
 			return `[truncated ${content.length - cap} bytes from the start — the stack trace is at the end]\n`
-				+ content.slice(content.length - cap);
+			+ content.slice(content.length - cap);
 		}
 	);
 
 
-	const selectorFrom = (id?: string, idPrefix?: string, text?: string): ElementSelector => {
+	const selectorFrom = (id?: string, idPrefix?: string, text?: string, index?: number): ElementSelector => {
 		if (!id && !idPrefix && !text) {
 			throw new ActionableError("Provide one of: id, idPrefix, or text.");
 		}
-		return { id, idPrefix, text };
+		return index ? { id, idPrefix, text, index } : { id, idPrefix, text };
 	};
+
+	/** The index parameter every selector-taking tool shares. */
+	const indexParam = () => z.coerce.number().int().min(0).optional().describe("Pick the Nth match (0-based, visible first) when the selector matches several. Default 0.");
 
 	tool(
 		"mobile_tap_on_element",
 		"Tap Element",
-		"Tap (or long-press) an element by its Compose test tag or by its visible text. Prefer this over tapping coordinates: a tag survives relayout, scrolling and translation, whereas coordinates do not. Text matching ignores Arabic diacritics, bidi isolates and Uzbek apostrophe variants, and never resolves to the soft keyboard's own keys.",
+		"Tap (or long-press) an element by test tag, tag prefix, or visible text — prefer this over coordinates, which break on relayout and scrolling. Text matching folds Arabic diacritics, bidi isolates and Uzbek apostrophe variants and never resolves to keyboard keys. The result says whether the screen changed and how many elements matched.",
 		{
 			device: deviceParam(),
 			id: z.string().optional().describe("Exact test tag / resource-id, e.g. shell.dock.library"),
 			idPrefix: z.string().optional().describe("Test tag prefix — taps the best (visible-first) member of a family, e.g. dictionary.search.result. for the first search result"),
 			text: z.string().optional().describe("Visible text or accessibility label. Matched leniently."),
+			index: indexParam(),
 			longPress: z.boolean().optional().describe("Long-press instead of tapping — context menus, drag-mode entry, word selection."),
 		},
 		{ destructiveHint: true },
-		async ({ device, id, idPrefix, text, longPress }) => {
+		async ({ device, id, idPrefix, text, index, longPress }) => {
 			const robot = getRobot(device);
-			const selector = selectorFrom(id, idPrefix, text);
-			const element = longPress
+			const selector = selectorFrom(id, idPrefix, text, index);
+			const result = longPress
 				? await robot.longPressOnElement(selector)
 				: await robot.tapOnElement(selector);
-			const name = element.identifier || element.text || element.label;
-			const verb = longPress ? "Long-pressed" : "Tapped";
-			// Report how it was tapped. Through the agent the node itself receives the action and no
-			// coordinate is involved, so printing one would misdescribe what happened and send anyone
-			// debugging a missed tap looking at the wrong layer.
-			if (await robot.transport() === "agent") {
-				return `${verb} ${name} directly (agent, no coordinates)`;
-			}
-			const x = Math.round(element.rect.x + element.rect.width / 2);
-			const y = Math.round(element.rect.y + element.rect.height / 2);
-			return `${verb} ${name} at ${x},${y} (adb coordinates)`;
-		}
-	);
-
-	tool(
-		"mobile_find_elements",
-		"Find Elements",
-		"Find elements by test tag, tag prefix, or lenient text match, without tapping. Returns the matches most-specific first. Use idPrefix to enumerate a family such as shell.dock. — useful for discovering what a screen exposes.",
-		{
-			device: deviceParam(),
-			id: z.string().optional().describe("Exact test tag / resource-id"),
-			idPrefix: z.string().optional().describe("Test tag prefix, e.g. shell.dock."),
-			text: z.string().optional().describe("Visible text or accessibility label. Matched leniently."),
-		},
-		{ readOnlyHint: true },
-		async ({ device, id, idPrefix, text }) => {
-			const robot = getRobot(device);
-			const matches = await robot.findElements(selectorFrom(id, idPrefix, text));
-			return JSON.stringify(await robot.envelope({
-				query: describeSelector(selectorFrom(id, idPrefix, text)),
-				count: matches.length,
-				elements: matches,
-			}));
+			// How it landed is the point: "tapped" alone reads the same for a live button and a dead
+			// one, and the agent knows which it was.
+			return describeTap(result, longPress ? "Long-pressed" : "Tapped");
 		}
 	);
 
@@ -1014,7 +983,7 @@ export const createMcpServer = (): McpServer => {
 	tool(
 		"mobile_run_steps",
 		"Run Step Sequence",
-		"Run a whole journey in one call, settling between steps: launch, tap, long-press, set Unicode text, scroll to an element, assert, press buttons, swipe. Stops at the first failing step with per-step timings, so one call replaces five round trips and the log says exactly where and why it stopped. Set snapshot:true to receive the final screen's compact element tree in the same result — saving the follow-up list call.",
+		"Run a whole journey in one call, settling between steps: launch, tap, long-press, set Unicode text, scroll to an element, assert, press buttons, swipe. Stops at the first failing step with per-step timings, so one call replaces five round trips and the log says exactly where and why it stopped. Set snapshot to receive the final screen in the same result (true = full compact tree, \"interactive\" = actionable lines only), saving the follow-up list call.",
 		{
 			device: deviceParam(),
 			steps: z.array(z.object({
@@ -1023,6 +992,7 @@ export const createMcpServer = (): McpServer => {
 				tapId: z.string().optional().describe("Tap the element with this test tag"),
 				tapIdPrefix: z.string().optional().describe("Tap the best member of a tag family, e.g. dictionary.search.result."),
 				tapText: z.string().optional().describe("Tap the element matching this text"),
+				index: z.coerce.number().int().min(0).optional().describe("With tapIdPrefix/tapText: pick the Nth match (0-based, visible first)"),
 				longPress: z.boolean().optional().describe("With tapId/tapIdPrefix/tapText: long-press instead of tap"),
 				setText: z.object({
 					id: z.string().optional().describe("Field test tag"),
@@ -1047,7 +1017,7 @@ export const createMcpServer = (): McpServer => {
 				}).optional().describe("Assert screen state, waiting up to timeoutMs (default 4000) for it to come true; a failed assertion stops the sequence with evidence"),
 			})).describe("Steps, executed in order"),
 			settle: z.boolean().optional().describe("Wait for the UI to settle between steps. Default true."),
-			snapshot: z.boolean().optional().describe("Append the final screen's compact element tree to the result. Default false."),
+			snapshot: z.union([z.boolean(), z.literal("interactive")]).optional().describe("Append the final screen: true = compact tree, \"interactive\" = actionable lines only. Default false."),
 		},
 		{ destructiveHint: true },
 		async ({ device, steps, settle, snapshot }) => {
@@ -1057,14 +1027,21 @@ export const createMcpServer = (): McpServer => {
 
 			const finish = async (completed: number): Promise<string> => {
 				const result: any = { completed, total: steps.length, log };
-				const payload = JSON.stringify(await robot.envelope(result));
-				if (!snapshot) {
-					return payload;
+				let text = JSON.stringify(await robot.envelope(result));
+				if (snapshot) {
+					let elements = compactForDisplay(await robot.getElementsOnScreen());
+					if (snapshot === "interactive") {
+						elements = elements.filter(isInteractive);
+					}
+					const lines = formatCompactElementLines(elements);
+					robot.lastCompactLines = lines;
+					text = `${text}\n${lines.join("\n")}`;
 				}
-				const elements = await robot.getElementsOnScreen();
-				const lines = formatCompactElementLines(elements);
-				robot.lastCompactLines = lines;
-				return `${payload}\n${lines.join("\n")}`;
+				// A journey that stopped early is a failed call, carrying its own evidence.
+				if (completed < steps.length) {
+					throw new ToolFailure(text);
+				}
+				return text;
 			};
 
 			for (let i = 0; i < steps.length; i++) {
@@ -1082,12 +1059,11 @@ export const createMcpServer = (): McpServer => {
 						const verb = step.relaunch ? "relaunched" : "launched";
 						log.push(`${i}: ${verb} ${pkg}${confirmed ? "" : " (foreground NOT confirmed)"} ${took()}`);
 					} else if (step.tapId || step.tapIdPrefix || step.tapText) {
-						const selector = { id: step.tapId, idPrefix: step.tapIdPrefix, text: step.tapText };
-						const element = step.longPress
+						const selector = { id: step.tapId, idPrefix: step.tapIdPrefix, text: step.tapText, index: step.index };
+						const tapped = step.longPress
 							? await robot.longPressOnElement(selector)
 							: await robot.tapOnElement(selector);
-						const verb = step.longPress ? "long-pressed" : "tapped";
-						log.push(`${i}: ${verb} ${element.identifier || element.text || element.label} ${took()}`);
+						log.push(`${i}: ${describeTap(tapped, step.longPress ? "long-pressed" : "tapped")} ${took()}`);
 					} else if (step.setText) {
 						const target = await robot.setTextOn({ id: step.setText.id, text: step.setText.text }, step.setText.value);
 						log.push(`${i}: set ${target.identifier || target.label || "field"} ${took()}`);
@@ -1114,7 +1090,7 @@ export const createMcpServer = (): McpServer => {
 							log.push(`${i}: ASSERTION FAILED ${JSON.stringify(result.checks.filter(c => !c.passed))} ${took()}`);
 							return await finish(i);
 						}
-						log.push(`${i}: asserted ${result.selector} ${took()}`);
+						log.push(`${i}: asserted ${result.selector ?? `foreground=${expected.foregroundPackage}`} ${took()}`);
 					} else {
 						throw new ActionableError("Step has no action.");
 					}
@@ -1146,11 +1122,12 @@ export const createMcpServer = (): McpServer => {
 			id: z.string().optional().describe("Test tag / resource-id of the field"),
 			text: z.string().optional().describe("Visible text or label identifying the field"),
 			value: z.string().describe("Text to write. Empty string clears the field."),
+			index: indexParam(),
 		},
 		{ destructiveHint: true },
-		async ({ device, id, text, value }) => {
+		async ({ device, id, text, value, index }) => {
 			const robot = getRobot(device);
-			const target = await robot.setTextOn(selectorFrom(id, undefined, text), value);
+			const target = await robot.setTextOn(selectorFrom(id, undefined, text, index), value);
 			return `Set ${target.identifier || target.label || "field"} to ${JSON.stringify(value)}`;
 		}
 	);
@@ -1236,11 +1213,15 @@ export const createMcpServer = (): McpServer => {
 				{ exists, visible, textEquals, minCount, foregroundPackage },
 				timeoutMs,
 			);
-			const payload = JSON.stringify(await robot.envelope(result));
-			// Lead with the verdict. A failed assertion is not a "retry and it may work" condition —
-			// it means the screen or the expectation is wrong — so it must not be phrased like the
-			// server's recoverable errors, and it must be impossible to skim past.
-			return result.passed ? `ASSERTION PASSED ${payload}` : `ASSERTION FAILED ${payload}`;
+			// A pass needs one line: the evidence matters only when the expectation did not hold. A
+			// failure carries every check and the best match, flagged as an error so it cannot be
+			// skimmed past as a result.
+			if (result.passed) {
+				const subject = result.selector ?? `foreground=${foregroundPackage}`;
+				const matches = result.selector ? `, ${result.matchCount} match${result.matchCount === 1 ? "" : "es"}` : "";
+				return `ASSERTION PASSED ${subject}${matches} (${result.waitedMs}ms)`;
+			}
+			throw new ToolFailure(`ASSERTION FAILED ${JSON.stringify(await robot.envelope(result))}`);
 		}
 	);
 
@@ -1617,6 +1598,7 @@ export const createMcpServer = (): McpServer => {
 				coordinateFreeTaps: agent,
 				visibilityReporting: agent,
 				unicodeTextEntry: agent,
+				...(robot.driverInstall ? { driverInstall: robot.driverInstall } : {}),
 				...(agent ? {} : {
 					installedInstrumentations: robot.installedInstrumentations(),
 					startCommand: agentStartHint(device),

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { AndroidRobot } from "./android";
 import { parseInstrumentations } from "./config";
-import { AGENT_IDENTITY, AgentClient, AgentTimeoutError, GesturePoint, PinchRequest, agentStartHint, toScreenElement } from "./agent";
+import { AGENT_IDENTITY, ActionOutcome, AgentClient, AgentSelector, AgentTimeoutError, GesturePoint, PinchRequest, agentStartHint, toScreenElement } from "./agent";
 import { ActionableError, ScreenElement } from "./robot";
 
 /**
@@ -74,6 +74,24 @@ export interface ElementSelector {
 	idPrefix?: string;
 	/** Visible text or accessibility label; folded before comparison. */
 	text?: string;
+	/** 0-based pick among the matches, visible ones first. Default 0 — the best match. */
+	index?: number;
+}
+
+/**
+ * What a tap on an element did.
+ *
+ * `method` says how it was delivered: `node` (the accessibility action changed the screen),
+ * `gesture` (the node action did not visibly land, so a real tap followed), or `coordinates` (adb
+ * transport). `changed:false` means the screen did not move at all — a disabled control, a dead
+ * handler, or a tap that is correctly a no-op. `matchCount` above 1 means the selector was
+ * ambiguous and `index` picked one.
+ */
+export interface TapResult {
+	element: ScreenElement;
+	method: "node" | "gesture" | "coordinates";
+	changed?: boolean;
+	matchCount: number;
 }
 
 export interface AssertionCheck {
@@ -108,10 +126,45 @@ export interface DisplayStateRequest {
 }
 
 export const describeSelector = (selector: ElementSelector): string =>
-	selector.id ? `id="${selector.id}"`
+	(selector.id ? `id="${selector.id}"`
 		: selector.idPrefix ? `idPrefix="${selector.idPrefix}"`
 			: selector.text ? `text="${selector.text}"`
-				: "<empty selector>";
+				: "<empty selector>")
+	+ (selector.index ? ` index=${selector.index}` : "");
+
+/**
+ * Collapse tag families for a message.
+ *
+ * Generated suffixes make every row of a list its own tag (`dictionary.search.result.<uuid>`), and
+ * listing them all spends a line of tokens per row on identifiers no caller would type. Three or
+ * more siblings under one prefix read as `prefix.* (n)` — which is exactly the `idPrefix` a caller
+ * should use, with `index` to pick a row.
+ */
+export const summarizeTags = (ids: string[]): string[] => {
+	const families = new Map<string, number>();
+	for (const id of ids) {
+		const cut = id.lastIndexOf(".");
+		if (cut > 0) {
+			const prefix = id.slice(0, cut + 1);
+			families.set(prefix, (families.get(prefix) ?? 0) + 1);
+		}
+	}
+	const out: string[] = [];
+	const emitted = new Set<string>();
+	for (const id of ids) {
+		const cut = id.lastIndexOf(".");
+		const prefix = cut > 0 ? id.slice(0, cut + 1) : "";
+		if (prefix && (families.get(prefix) ?? 0) >= 3) {
+			if (!emitted.has(prefix)) {
+				emitted.add(prefix);
+				out.push(`${prefix}* (${families.get(prefix)})`);
+			}
+		} else {
+			out.push(id);
+		}
+	}
+	return out;
+};
 
 const area = (element: ScreenElement): number => element.rect.width * element.rect.height;
 
@@ -174,6 +227,16 @@ export const mergeColocated = (elements: ScreenElement[]): ScreenElement[] => {
 		if (group.some(e => e.scrollable)) {
 			merged.scrollable = true;
 		}
+		if (group.some(e => e.enabled === false)) {
+			merged.enabled = false;
+		}
+		if (group.some(e => e.selected)) {
+			merged.selected = true;
+		}
+		const checkable = group.find(e => e.checked !== undefined);
+		if (checkable) {
+			merged.checked = checkable.checked;
+		}
 		// Same rectangle, so visibility agrees; carry it when any member knows it.
 		const knowsVisibility = group.filter(e => e.visible !== undefined);
 		if (knowsVisibility.length > 0) {
@@ -184,16 +247,15 @@ export const mergeColocated = (elements: ScreenElement[]): ScreenElement[] => {
 };
 
 /**
- * Find every element matching a selector, best candidate first.
+ * Find every element matching a selector: visible ones first, then in the order the tree reports
+ * them.
  *
- * Ranking is clickable-first, then smallest box. Clickability only RANKS and never filters: a
- * selected Material tab reports `clickable=false` because `Role.Tab` plus a selected state maps
- * differently into AccessibilityNodeInfo, so filtering would make the currently-active
- * destination unaddressable — exactly when a caller is most likely to reach for it.
- *
- * Smallest-box-first alone is wrong for tapping. A dictionary result row carries its word in a
- * small inner TextView and its tap handler on the large outer row; the inner node wins on area but
- * is not the thing to touch.
+ * This is the agent's own ranking, so `index` means the same thing whether it is resolved on the
+ * device, here on the adb path, or read off a numbered listing. The earlier clickable-first,
+ * smallest-box-first ranking made `[0]` in a listing a different row from the one `index: 0`
+ * tapped (measured 2026-09-30). Clickability is not needed to rank, and never filters — a selected
+ * Material tab reports `clickable=false` — because a tap walks up to the nearest clickable ancestor
+ * after choosing ([clickableAncestor] here, the same walk on the device).
  */
 export const selectElements = (elements: ScreenElement[], selector: ElementSelector): ScreenElement[] => {
 	let matches: ScreenElement[];
@@ -212,20 +274,10 @@ export const selectElements = (elements: ScreenElement[], selector: ElementSelec
 		throw new ActionableError("A selector needs one of: id, idPrefix, or text.");
 	}
 
-	return matches.slice().sort((a, b) => {
-		// Visible beats hidden before anything else: a lazy list keeps offscreen rows attached,
-		// and acting on an attached-but-covered match is always wrong. `undefined` (adb transport)
-		// ranks with visible — unknown is not evidence of covering.
-		const aHidden = a.visible === false;
-		const bHidden = b.visible === false;
-		if (aHidden !== bHidden) {
-			return aHidden ? 1 : -1;
-		}
-		if (Boolean(a.clickable) !== Boolean(b.clickable)) {
-			return a.clickable ? -1 : 1;
-		}
-		return area(a) - area(b);
-	});
+	// Visible beats hidden: a lazy list keeps offscreen rows attached, and acting on an
+	// attached-but-covered match is always wrong. `undefined` (adb transport) ranks with visible —
+	// unknown is not evidence of covering. The sort is stable, so tree order holds within each group.
+	return matches.slice().sort((a, b) => Number(a.visible === false) - Number(b.visible === false));
 };
 
 const contains = (outer: ScreenElement, inner: ScreenElement): boolean =>
@@ -256,6 +308,10 @@ export const clickableAncestor = (elements: ScreenElement[], element: ScreenElem
 	return enclosing[0] ?? element;
 };
 
+/** The agent wire shape of a selector; undefined fields are dropped by JSON serialization. */
+const agentSelector = (selector: ElementSelector): AgentSelector =>
+	({ id: selector.id, idPrefix: selector.idPrefix, text: selector.text, index: selector.index });
+
 export interface StabilityResult {
 	stable: boolean;
 	waitedMs: number;
@@ -271,6 +327,123 @@ export interface StabilityResult {
 const INFORMATIVE_TYPES = /(EditText|Button|Switch|CheckBox|RadioButton|SeekBar|Slider|ImageView|WebView|ProgressBar|Spinner)$/;
 
 /**
+ * Framework chrome that wraps screens and dialogs and never answers a question about them. Any
+ * wordless, inert `android:id/*` node qualifies (`content`, `parentPanel`, bar backgrounds), as do
+ * the app-namespaced `action_bar_root` and `content` roots every activity carries.
+ */
+const FRAMEWORK_WRAPPER_ID = /^android:id\/|:id\/(action_bar_root|content)$/;
+
+const hasWords = (element: ScreenElement): boolean => Boolean(element.text || element.label);
+
+const isWrapper = (element: ScreenElement): boolean =>
+	!hasWords(element) && !element.clickable && !element.scrollable
+	&& (!element.identifier || FRAMEWORK_WRAPPER_ID.test(element.identifier));
+
+/**
+ * Shape the raw tree into what a reader needs: one line per thing a person would point at.
+ *
+ * Presentation only — selectors always resolve against the raw elements, so nothing here can make
+ * an element unaddressable. Measured on a real dictionary screen (2026-09-30) this removes about a
+ * third of the characters and half the lines, while making more lines actionable:
+ *
+ * - The soft keyboard's window collapses to one line saying it is open and where.
+ * - Framework wrappers (`android:id/content`, `action_bar_root`) are dropped. They span the whole
+ *   window on every screen and carry no words.
+ * - Nodes sharing one rectangle fuse into one line ([mergeColocated]). Compose routinely splits a
+ *   control across a tagged, clickable node and a sibling carrying its description.
+ * - Each untagged word folds into the smallest clickable (or selected) container around it that
+ *   shares its visibility. When it has no words of
+ *   its own they become its text (`"Save to a collection" @… clickable` instead of an anonymous
+ *   clickable box plus a separate line of text); when its description already says them, the
+ *   repeated lines go. Containers covering half the screen or more are left alone — they are
+ *   layout, not controls.
+ */
+/** The actionable subset shown by `filter: "interactive"`; an open keyboard stays, since it occludes. */
+export const isInteractive = (element: ScreenElement): boolean =>
+	Boolean(element.clickable || element.focused || element.identifier || element.ime);
+
+export const compactForDisplay = (all: ScreenElement[]): ScreenElement[] => {
+	// The soft keyboard publishes every key as a labelled, clickable node: a hundred-odd lines on
+	// a phone (measured 2026-09-30: ~2.5k tokens of Gboard in one listing) that say only "the
+	// keyboard is open". That fact, and where it sits, is what a reader needs.
+	const keys = all.filter(element => element.ime);
+	const elements = keys.length > 0 ? all.filter(element => !element.ime) : all;
+	const keyboard: ScreenElement[] = [];
+	if (keys.length > 0) {
+		// Bounds from the keys themselves: the keyboard window's root spans the whole display.
+		const keyRects = keys.filter(e => e.clickable || hasWords(e));
+		const extent = keyRects.length > 0 ? keyRects : keys;
+		const left = Math.min(...extent.map(e => e.rect.x));
+		const top = Math.min(...extent.map(e => e.rect.y));
+		keyboard.push({
+			type: "keyboard",
+			ime: true,
+			label: "soft keyboard open — mobile_press_button BACK dismisses it",
+			rect: {
+				x: left,
+				y: top,
+				width: Math.max(...extent.map(e => e.rect.x + e.rect.width)) - left,
+				height: Math.max(...extent.map(e => e.rect.y + e.rect.height)) - top,
+			},
+		});
+	}
+	// Wrappers go before merging: they share the window's bounds with the app's own root tag, and
+	// fusing first would hand that tag's line a framework identifier and then drop it.
+	const merged = mergeColocated(elements.filter(element => !isWrapper(element)));
+	// The screen is the extent of everything reported, wrappers included — not the largest survivor,
+	// which on a sparse screen is a control and would exempt itself from absorbing its own label.
+	const right = Math.max(1, ...elements.map(e => e.rect.x + e.rect.width));
+	const bottom = Math.max(1, ...elements.map(e => e.rect.y + e.rect.height));
+	const screenArea = right * bottom;
+	// Each word belongs to its smallest enclosing control, so a Retry button inside a clickable card
+	// keeps "Retry" instead of the card taking it. A selected tab reports clickable=false (Role.Tab
+	// plus selected) but is still a control. Containers covering half the screen are layout.
+	const controls = merged.filter(c => (c.clickable || c.selected) && area(c) < screenArea / 2);
+	const owned = new Map<ScreenElement, ScreenElement[]>();
+	for (const candidate of merged) {
+		if (candidate.clickable || candidate.selected || candidate.identifier || candidate.scrollable || !hasWords(candidate)) {
+			continue;
+		}
+		const owner = controls
+			// A hidden word folds only into a hidden control, so `hidden` is never lost.
+			.filter(c => contains(c, candidate) && (candidate.visible !== false || c.visible === false))
+			.sort((a, b) => area(a) - area(b))[0];
+		if (owner) {
+			owned.set(owner, [...(owned.get(owner) ?? []), candidate]);
+		}
+	}
+
+	const absorbed = new Set<ScreenElement>();
+	const rewritten = new Map<ScreenElement, ScreenElement>();
+	for (const [container, inner] of owned) {
+		if (hasWords(container)) {
+			const said = foldForMatch(`${container.text ?? ""} ${container.label ?? ""}`);
+			for (const candidate of inner) {
+				const words = [candidate.text, candidate.label].filter(Boolean) as string[];
+				if (words.every(word => said.includes(foldForMatch(word)))) {
+					absorbed.add(candidate);
+				}
+			}
+		} else {
+			const parts: string[] = [];
+			for (const candidate of inner) {
+				const word = (candidate.text || candidate.label) as string;
+				if (!parts.some(part => foldForMatch(part) === foldForMatch(word))) {
+					parts.push(word);
+				}
+				absorbed.add(candidate);
+			}
+			rewritten.set(container, { ...container, text: parts.join(" · ") });
+		}
+	}
+
+	return merged
+		.filter(element => !absorbed.has(element))
+		.map(element => rewritten.get(element) ?? element)
+		.concat(keyboard);
+};
+
+/**
  * One element per line, everything empty omitted.
  *
  * The JSON shape spends most of its bytes on structure: braces, key names, and a nested
@@ -280,7 +453,7 @@ const INFORMATIVE_TYPES = /(EditText|Button|Switch|CheckBox|RadioButton|SeekBar|
  * every action. Geometry stays present so coordinate-based tools remain usable from this output.
  *
  * Format, per line:
- *   `#<id> "<text>" (desc) <Type> @x,y wxh clickable focused scrollable hidden`
+ *   `#<id> "<text>" (desc) <Type> @x,y wxh clickable focused scrollable disabled selected checked hidden`
  * where only the segments that exist appear, and Type only when it is informative
  * (an EditText tells the caller something; `android.view.View` does not). `hidden` marks a node
  * the agent reports as not visible to the user — present in the tree but covered or offscreen —
@@ -289,14 +462,19 @@ const INFORMATIVE_TYPES = /(EditText|Button|Switch|CheckBox|RadioButton|SeekBar|
 export const formatCompactElementLines = (elements: ScreenElement[]): string[] =>
 	elements.map(element => {
 		const parts: string[] = [];
+		// Bidi isolates are presentation the app wraps around mixed-direction text. They carry no
+		// meaning for a reader and cost tokens on every Arabic or Hebrew string, so they are
+		// dropped here; matching folds them away independently.
+		const text = element.text ? stripBidi(element.text) : "";
+		const label = element.label ? stripBidi(element.label) : "";
 		if (element.identifier) {
 			parts.push(`#${element.identifier}`);
 		}
-		if (element.text) {
-			parts.push(JSON.stringify(element.text));
+		if (text) {
+			parts.push(JSON.stringify(text));
 		}
-		if (element.label && element.label !== element.text) {
-			parts.push(`(${element.label})`);
+		if (label && label !== text) {
+			parts.push(`(${label})`);
 		}
 		const type = element.type?.match(INFORMATIVE_TYPES)?.[1];
 		if (type) {
@@ -311,6 +489,15 @@ export const formatCompactElementLines = (elements: ScreenElement[]): string[] =
 		}
 		if (element.scrollable) {
 			parts.push("scrollable");
+		}
+		if (element.enabled === false) {
+			parts.push("disabled");
+		}
+		if (element.selected) {
+			parts.push("selected");
+		}
+		if (element.checked !== undefined) {
+			parts.push(element.checked ? "checked" : "unchecked");
 		}
 		if (element.visible === false) {
 			parts.push("hidden");
@@ -593,10 +780,7 @@ export class AgentAndroidRobot extends AndroidRobot {
 				+ `Start it with: ${agentStartHint(this.deviceId)}`
 			);
 		}
-		const target = await this.agent.scrollIntoView(
-			{ id: selector.id, idPrefix: selector.idPrefix, text: selector.text },
-			maxScrolls,
-		);
+		const target = await this.agent.scrollIntoView(agentSelector(selector), maxScrolls);
 		this.invalidate();
 		return target ? toScreenElement(target) : await this.requireElement(selector);
 	}
@@ -837,6 +1021,11 @@ export class AgentAndroidRobot extends AndroidRobot {
 	 * and says nothing. Showing the caller what IS installed next to what was EXPECTED makes the
 	 * mismatch obvious without a round of debugging.
 	 */
+	/** What the automatic driver install did this session, if it ran. */
+	public get driverInstall(): { installed: boolean; from?: string; error?: string } | null {
+		return this.agent.driverInstall;
+	}
+
 	public installedInstrumentations(): { testPackage: string; targetPackage: string }[] {
 		try {
 			return parseInstrumentations(this.adb("shell", "pm", "list", "instrumentation").toString())
@@ -1076,8 +1265,14 @@ export class AgentAndroidRobot extends AndroidRobot {
 	public async requireElement(selector: ElementSelector): Promise<ScreenElement> {
 		const elements = await this.getElementsOnScreen();
 		const matches = selectElements(elements, selector);
+		const index = selector.index ?? 0;
+		if (matches.length > index) {
+			return matches[index];
+		}
 		if (matches.length > 0) {
-			return matches[0];
+			throw new ActionableError(
+				`${describeSelector(selector)} is out of range: ${matches.length} element(s) matched, so index must be 0-${matches.length - 1}`
+			);
 		}
 
 		const addressable = elements
@@ -1088,9 +1283,9 @@ export class AgentAndroidRobot extends AndroidRobot {
 		throw new ActionableError(
 			`No element matched ${describeSelector(selector)}. `
 			+ (addressable.length > 0
-				? `Addressable test tags on screen: ${addressable.join(", ")}.`
+				? `Test tags on screen: ${summarizeTags(addressable).join(", ")}.`
 				: "No test tags are present on this screen — it may still be loading, or the surface is untagged.")
-			+ " Use mobile_list_elements_on_screen for the full tree."
+			+ " mobile_list_elements_on_screen shows the full tree"
 		);
 	}
 
@@ -1136,17 +1331,14 @@ export class AgentAndroidRobot extends AndroidRobot {
 	 * focused field, then re-resolve against the settled layout. That is what a person does, and it
 	 * removes the failure mode instead of detecting it.
 	 */
-	public async tapOnElement(selector: ElementSelector, options: { dismissKeyboard?: boolean } = {}): Promise<ScreenElement> {
+	public async tapOnElement(selector: ElementSelector, options: { dismissKeyboard?: boolean } = {}): Promise<TapResult> {
 		// The agent dispatches ACTION_CLICK to the node itself. There is no tap point, so keyboard
 		// occlusion, scroll offset and mid-animation relayout stop being able to misdirect a tap.
 		if (await this.useAgent() && (selector.id || selector.idPrefix || selector.text)) {
 			try {
-				const target = await this.agent.click({ id: selector.id, idPrefix: selector.idPrefix, text: selector.text });
+				const outcome = await this.agent.click(agentSelector(selector));
 				this.invalidate();
-				if (target) {
-					return toScreenElement(target);
-				}
-				return await this.requireElement(selector);
+				return await this.tapResult(outcome, selector);
 			} catch (error: any) {
 				if (/no node matched/i.test(error?.message ?? "")) {
 					// The agent's bare message strands the caller. Fall through to the coordinate
@@ -1169,12 +1361,27 @@ export class AgentAndroidRobot extends AndroidRobot {
 			element = await this.requireElement(selector);
 		}
 
+		const matchCount = selectElements(await this.getElementsOnScreen(), selector).length;
 		element = clickableAncestor(await this.getElementsOnScreen(), element);
 
 		const x = Math.round(element.rect.x + element.rect.width / 2);
 		const y = Math.round(element.rect.y + element.rect.height / 2);
 		await this.tap(x, y);
-		return element;
+		return { element, method: "coordinates", matchCount };
+	}
+
+	/** Shape an agent click outcome, falling back to a fresh resolve when the agent sent no target. */
+	private async tapResult(outcome: ActionOutcome, selector: ElementSelector): Promise<TapResult> {
+		const element = outcome.target ? toScreenElement(outcome.target) : await this.requireElement(selector);
+		const result: TapResult = {
+			element,
+			method: outcome.method === "gesture" ? "gesture" : "node",
+			matchCount: outcome.matchCount ?? 1,
+		};
+		if (outcome.changed !== undefined) {
+			result.changed = outcome.changed;
+		}
+		return result;
 	}
 
 	/**
@@ -1223,7 +1430,7 @@ export class AgentAndroidRobot extends AndroidRobot {
 			);
 		}
 		try {
-			const target = await this.agent.setText({ id: selector.id, text: selector.text }, value);
+			const target = await this.agent.setText(agentSelector(selector), value);
 			this.invalidate();
 			return target ? toScreenElement(target) : await this.requireElement(selector);
 		} catch (error: any) {
@@ -1245,15 +1452,12 @@ export class AgentAndroidRobot extends AndroidRobot {
 	 * verified-change-with-gesture-fallback contract as tapping applies. Over adb it degrades to a
 	 * timed press at the element's centre.
 	 */
-	public async longPressOnElement(selector: ElementSelector, durationMs = 600): Promise<ScreenElement> {
+	public async longPressOnElement(selector: ElementSelector, durationMs = 600): Promise<TapResult> {
 		if (await this.useAgent() && (selector.id || selector.idPrefix || selector.text)) {
 			try {
-				const target = await this.agent.longClick({ id: selector.id, idPrefix: selector.idPrefix, text: selector.text });
+				const outcome = await this.agent.longClick(agentSelector(selector));
 				this.invalidate();
-				if (target) {
-					return toScreenElement(target);
-				}
-				return await this.requireElement(selector);
+				return await this.tapResult(outcome, selector);
 			} catch (error: any) {
 				if (/no node matched/i.test(error?.message ?? "")) {
 					// Same contract as tapOnElement: fall through to the coordinate path for either
@@ -1265,11 +1469,12 @@ export class AgentAndroidRobot extends AndroidRobot {
 			}
 		}
 
+		const matchCount = selectElements(await this.getElementsOnScreen(), selector).length;
 		const element = clickableAncestor(await this.getElementsOnScreen(), await this.requireElement(selector));
 		const x = Math.round(element.rect.x + element.rect.width / 2);
 		const y = Math.round(element.rect.y + element.rect.height / 2);
 		await this.longPress(x, y, durationMs);
-		return element;
+		return { element, method: "coordinates", matchCount };
 	}
 
 	/**

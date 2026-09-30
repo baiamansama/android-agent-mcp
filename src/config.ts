@@ -111,3 +111,45 @@ export const agentStartHint = (deviceId: string, identity: AgentIdentity): strin
 	`adb -s ${deviceId} shell am instrument -w -e class ${identity.className} `
 	+ `${identity.testPackage}/${INSTRUMENTATION_RUNNER} `
 	+ "(run it in the background; it blocks while serving)";
+
+/** The two APKs that make up the standalone driver. */
+export interface DriverApks {
+	app: string;
+	test: string;
+}
+
+const DRIVER_APP_APK = "driver-debug.apk";
+const DRIVER_TEST_APK = "driver-debug-androidTest.apk";
+
+/**
+ * Where a locally available copy of the standalone driver lives, if anywhere.
+ *
+ * Checked in order: `ANDROID_AGENT_DRIVER_DIR` (both APKs side by side), a `driver/` directory
+ * next to `lib/` (how a packaged or vendored copy ships them), and this repository's own Gradle
+ * output (a source checkout after `npm run agent:build`). The first directory holding both wins.
+ *
+ * `root` is the package root; injectable so the lookup can be tested without touching the real
+ * build tree.
+ */
+export const resolveDriverApks = (
+	root: string,
+	exists: (file: string) => boolean,
+	join: (...parts: string[]) => string,
+): DriverApks | null => {
+	const candidates: DriverApks[] = [];
+	const configured = env("ANDROID_AGENT_DRIVER_DIR");
+	if (configured) {
+		candidates.push({ app: join(configured, DRIVER_APP_APK), test: join(configured, DRIVER_TEST_APK) });
+	}
+	candidates.push({ app: join(root, "driver", DRIVER_APP_APK), test: join(root, "driver", DRIVER_TEST_APK) });
+	const outputs = join(root, "agent", "driver", "build", "outputs", "apk");
+	candidates.push({
+		app: join(outputs, "debug", DRIVER_APP_APK),
+		test: join(outputs, "androidTest", "debug", DRIVER_TEST_APK),
+	});
+	return candidates.find(pair => exists(pair.app) && exists(pair.test)) ?? null;
+};
+
+/** Auto-install is on unless `ANDROID_AGENT_AUTO_INSTALL=0`, and only ever for the standalone driver. */
+export const autoInstallEnabled = (identity: AgentIdentity): boolean =>
+	identity.mode === "standalone" && env("ANDROID_AGENT_AUTO_INSTALL") !== "0";

@@ -63,6 +63,18 @@ export interface ScreenElement {
 
 	/** Whether the node is a scroll container. Agent transport only. */
 	scrollable?: boolean;
+
+	/** False when the control is disabled. A disabled button still reports clickable, so this is the only tell. */
+	enabled?: boolean;
+
+	/** The current tab, chip or list selection. */
+	selected?: boolean;
+
+	/** Toggle state; present only on checkable nodes (switches, checkboxes, radio buttons). */
+	checked?: boolean;
+
+	/** Part of the soft keyboard's window (agent transport). Collapsed to one line for display. */
+	ime?: boolean;
 }
 
 export class ActionableError extends Error {

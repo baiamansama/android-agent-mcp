@@ -10,6 +10,42 @@ extrapolated.
 
 ---
 
+## 2026-09-30 — 0.3.0, fresh reads, Pixel 10 and Pixel Tablet emulators (API 37.1, arm64, macOS host)
+
+Same bench method. The app under test was a production Compose app (debug build) — the dictionary
+and shell screens of a language-learning app, including Arabic entry.
+
+**Why the numbers moved.** Before 0.3.0 the agent read from the accessibility node cache, which
+Compose does not always invalidate for a UiAutomation client. Measured on both emulators: after BACK
+closed a bottom sheet, the tree kept it `visible` at its old bounds for minutes; a tab switch whose
+pixels had changed still read as unchanged. Cached reads were fast because they were wrong.
+
+| Operation (Pixel 10) | 0.2.x (cached) | 0.3.0 (fresh) | note |
+|---|---|---|---|
+| Semantic tree dump, settled | 11ms | **~70ms** | 65–77ms over 8 reads; adb `uiautomator dump` is 2.3s on this AVD |
+| `waitStable`, settled | 250ms (on a frozen tree) | **~430ms** | three fresh fingerprint samples |
+| Dock tab `ACTION_CLICK` confirmed as `node` | 0 / 6 (all fell to a second, gesture tap) | **6 / 6** | pixels confirmed every tab switch in both builds |
+| Tap by element, warm | 1.0–2.0s (gesture path) | 0.2–2.0s | node path; the upper end is this debug build's tab composition |
+| Bottom sheet after BACK | still reported `visible` | gone | asserted `exists:false` in 159ms |
+
+| Token cost | before | 0.3.0 | note |
+|---|---|---|---|
+| Dictionary screen, keyboard open | ~2,900 tok (143 lines) | **~520 tok (21 lines)** | same screen and state; 183 raw nodes, keyboard is one line |
+| Dictionary screen, drawer open (tablet) | 4,251 chars (92 lines) | 2,832 chars (45 lines) | offline prototype of the same rules on a captured tree |
+| Missed-selector error | ~190 tok | ~70 tok | tag families collapsed |
+| Passing assertion | ~125 tok | ~16 tok | one line; failures keep full evidence and `isError` |
+| Tool catalog (`tools/list`) | 38 tools, ~9.8k tok | 31 tools, ~8.7k tok | plus ~240 tok of MCP `instructions` |
+
+**Auto-install.** With the driver uninstalled, the first `mobile_launch_app` installed both APKs
+from this repo's build output and brought the agent up: 2.6s end to end, reported by
+`mobile_agent_status` as `driverInstall`.
+
+**The adb fallback, for scale.** Without the agent, `wait_for_stable` on a settled screen took 10.4s
+on the Pixel 10 AVD and 6.5s on the tablet (each sample is a ~2.1–2.3s `uiautomator dump`), and a
+screenshot 0.7s.
+
+---
+
 ## 2026-08-29 — the standalone driver, Pixel 10 emulator (API 37, arm64, macOS host)
 
 The current architecture: the agent runs in its own driver app and drives a **third-party** app it
